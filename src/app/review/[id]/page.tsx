@@ -3,13 +3,14 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter, useParams } from 'next/navigation'
 import { motion } from 'framer-motion'
-import { ArrowLeft, ExternalLink, User, Calendar, Hash, RefreshCw } from 'lucide-react'
+import { ArrowLeft, ExternalLink, User, Calendar, Hash, RefreshCw, Trash2, Pencil, X } from 'lucide-react'
 import Nav from '@/components/nav'
 import { StatusBadge, ContentTypeBadge } from '@/components/status-badge'
 import { PipelineStageLabel } from '@/components/pipeline-tracker'
 import PipelineTracker from '@/components/pipeline-tracker'
 import QCChecklist from '@/components/qc-checklist'
 import VideoPlayerNotes from '@/components/video-player-notes'
+import BrandReference from '@/components/brand-reference'
 import { createClient } from '@/lib/supabase/client'
 import { useAuth } from '@/hooks/use-auth'
 import { timeAgo, formatDateTime } from '@/lib/utils/date'
@@ -51,8 +52,12 @@ export default function ReviewPage() {
   const [existingChecklist, setExistingChecklist] = useState<QCChecklistResult | null>(null)
   const [loading, setLoading] = useState(true)
   const [actionLoading, setActionLoading] = useState(false)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [newNote, setNewNote] = useState('')
   const [noteCategory, setNoteCategory] = useState<NoteCategory>('creative')
+  const [editingGeneralNoteId, setEditingGeneralNoteId] = useState<string | null>(null)
+  const [editGeneralText, setEditGeneralText] = useState('')
+  const [deletingGeneralNoteId, setDeletingGeneralNoteId] = useState<string | null>(null)
 
   const userName = user || 'PM'
 
@@ -131,6 +136,49 @@ export default function ReviewPage() {
       .update({ is_resolved: true, resolved_at: new Date().toISOString() })
       .eq('id', noteId)
     await loadNotes()
+  }
+
+  async function handleEditNote(noteId: string, newText: string) {
+    await supabase
+      .from('qc_notes')
+      .update({ note: newText })
+      .eq('id', noteId)
+    await loadNotes()
+  }
+
+  async function handleDeleteNote(noteId: string) {
+    await supabase
+      .from('qc_notes')
+      .delete()
+      .eq('id', noteId)
+    await loadNotes()
+  }
+
+  async function handleSaveAnnotation(imageDataUrl: string, timestampSeconds: number) {
+    await supabase.from('qc_notes').insert({
+      submission_id: submissionId,
+      author_name: userName,
+      note: `[Annotation at ${Math.floor(timestampSeconds / 60)}:${String(Math.floor(timestampSeconds % 60)).padStart(2, '0')}]`,
+      timestamp_seconds: timestampSeconds,
+      category: 'creative' as NoteCategory,
+    })
+    await loadNotes()
+  }
+
+  async function handleDeleteSubmission() {
+    if (!submission) return
+    setActionLoading(true)
+    // Delete associated data first
+    await supabase.from('qc_notes').delete().eq('submission_id', submissionId)
+    await supabase.from('qc_checklist_results').delete().eq('submission_id', submissionId)
+    try {
+      await supabase.from('pipeline_stages').delete().eq('submission_id', submissionId)
+    } catch {
+      // Table may not exist
+    }
+    await supabase.from('qc_submissions').delete().eq('id', submissionId)
+    setActionLoading(false)
+    router.push('/dashboard')
   }
 
   async function handleChecklistSubmit(results: Record<QCChecklistKey, boolean>, overallPass: boolean) {
@@ -282,18 +330,51 @@ export default function ReviewPage() {
               </div>
             </div>
 
-            {/* Drive link */}
-            {submission.external_url && (
-              <a
-                href={submission.external_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="btn-secondary text-xs flex items-center gap-1.5"
-              >
-                <ExternalLink size={12} />
-                Google Drive
-              </a>
-            )}
+            <div className="flex items-center gap-2">
+              {/* Drive link */}
+              {submission.external_url && (
+                <a
+                  href={submission.external_url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="btn-secondary text-xs flex items-center gap-1.5"
+                >
+                  <ExternalLink size={12} />
+                  Google Drive
+                </a>
+              )}
+
+              {/* Delete submission (PM only) */}
+              {isPM && !showDeleteConfirm && (
+                <button
+                  onClick={() => setShowDeleteConfirm(true)}
+                  className="btn-secondary text-xs flex items-center gap-1.5"
+                  style={{ color: 'var(--red)', borderColor: 'var(--red)' }}
+                >
+                  <Trash2 size={12} />
+                  Delete
+                </button>
+              )}
+              {isPM && showDeleteConfirm && (
+                <div className="flex items-center gap-2 p-2 rounded-lg" style={{ background: 'var(--surface)', border: '1px solid var(--red)' }}>
+                  <span className="text-xs" style={{ color: 'var(--red)' }}>Delete this submission?</span>
+                  <button
+                    onClick={handleDeleteSubmission}
+                    disabled={actionLoading}
+                    className="text-xs px-3 py-1 rounded"
+                    style={{ background: 'var(--red)', color: '#fff' }}
+                  >
+                    {actionLoading ? 'Deleting...' : 'Yes, delete'}
+                  </button>
+                  <button
+                    onClick={() => setShowDeleteConfirm(false)}
+                    className="btn-secondary text-xs"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+            </div>
           </div>
 
           {/* Pipeline tracker (PM only) */}
@@ -320,6 +401,9 @@ export default function ReviewPage() {
                   notes={notes}
                   onAddNote={handleAddNote}
                   onResolveNote={handleResolveNote}
+                  onEditNote={handleEditNote}
+                  onDeleteNote={handleDeleteNote}
+                  onSaveAnnotation={handleSaveAnnotation}
                   readOnly={!isPM}
                 />
               )}
@@ -387,39 +471,127 @@ export default function ReviewPage() {
                       {notes.filter(n => n.timestamp_seconds === null).map((note) => (
                         <div
                           key={note.id}
-                          className="p-3 rounded-lg"
+                          className="p-3 rounded-lg group"
                           style={{
                             background: 'var(--surface-2)',
                             opacity: note.is_resolved ? 0.5 : 1,
                           }}
                         >
-                          <p
-                            className="text-sm"
-                            style={{
-                              color: 'var(--text)',
-                              textDecoration: note.is_resolved ? 'line-through' : 'none',
-                            }}
-                          >
-                            {note.note}
-                          </p>
-                          <div className="flex items-center gap-2 mt-1.5">
-                            <span className="badge badge-neutral text-[10px]">{note.category || 'general'}</span>
-                            <span className="text-xs" style={{ color: 'var(--text-3)' }}>{note.author_name}</span>
-                            {!note.is_resolved && (
+                          {editingGeneralNoteId === note.id ? (
+                            <div className="flex gap-2">
+                              <input
+                                type="text"
+                                value={editGeneralText}
+                                onChange={(e) => setEditGeneralText(e.target.value)}
+                                className="input flex-1 text-sm py-1"
+                                autoFocus
+                                onKeyDown={(e) => {
+                                  if (e.key === 'Enter' && editGeneralText.trim()) {
+                                    handleEditNote(note.id, editGeneralText.trim())
+                                    setEditingGeneralNoteId(null)
+                                  }
+                                  if (e.key === 'Escape') setEditingGeneralNoteId(null)
+                                }}
+                              />
                               <button
-                                onClick={() => handleResolveNote(note.id)}
-                                className="text-xs ml-auto transition-colors"
-                                style={{ color: 'var(--text-3)' }}
-                                onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--green)')}
-                                onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-3)')}
+                                onClick={() => {
+                                  if (editGeneralText.trim()) {
+                                    handleEditNote(note.id, editGeneralText.trim())
+                                    setEditingGeneralNoteId(null)
+                                  }
+                                }}
+                                className="btn-primary text-[10px] px-2 py-1"
                               >
-                                Resolve
+                                Save
                               </button>
-                            )}
-                            {note.is_resolved && (
-                              <span className="text-xs ml-auto" style={{ color: 'var(--green)' }}>Resolved</span>
-                            )}
-                          </div>
+                              <button
+                                onClick={() => setEditingGeneralNoteId(null)}
+                                className="btn-secondary text-[10px] px-2 py-1"
+                              >
+                                <X size={10} />
+                              </button>
+                            </div>
+                          ) : (
+                            <>
+                              <p
+                                className="text-sm"
+                                style={{
+                                  color: 'var(--text)',
+                                  textDecoration: note.is_resolved ? 'line-through' : 'none',
+                                }}
+                              >
+                                {note.note}
+                              </p>
+                              <div className="flex items-center gap-2 mt-1.5">
+                                <span className="badge badge-neutral text-[10px]">{note.category || 'general'}</span>
+                                <span className="text-xs" style={{ color: 'var(--text-3)' }}>{note.author_name}</span>
+                                <div className="flex items-center gap-1 ml-auto">
+                                  {!note.is_resolved && (
+                                    <>
+                                      <button
+                                        onClick={() => {
+                                          setEditingGeneralNoteId(note.id)
+                                          setEditGeneralText(note.note)
+                                        }}
+                                        className="p-1 rounded opacity-0 group-hover:opacity-100 transition-all"
+                                        style={{ color: 'var(--text-3)' }}
+                                        onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--blue)')}
+                                        onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-3)')}
+                                        title="Edit"
+                                      >
+                                        <Pencil size={11} />
+                                      </button>
+                                      <button
+                                        onClick={() => handleResolveNote(note.id)}
+                                        className="text-xs transition-colors"
+                                        style={{ color: 'var(--text-3)' }}
+                                        onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--green)')}
+                                        onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-3)')}
+                                      >
+                                        Resolve
+                                      </button>
+                                    </>
+                                  )}
+                                  {note.is_resolved && (
+                                    <span className="text-xs" style={{ color: 'var(--green)' }}>Resolved</span>
+                                  )}
+                                  {deletingGeneralNoteId === note.id ? (
+                                    <div className="flex items-center gap-1">
+                                      <span className="text-[10px]" style={{ color: 'var(--red)' }}>Delete?</span>
+                                      <button
+                                        onClick={() => {
+                                          handleDeleteNote(note.id)
+                                          setDeletingGeneralNoteId(null)
+                                        }}
+                                        className="text-[10px] px-1.5 py-0.5 rounded"
+                                        style={{ background: 'var(--red)', color: '#fff' }}
+                                      >
+                                        Yes
+                                      </button>
+                                      <button
+                                        onClick={() => setDeletingGeneralNoteId(null)}
+                                        className="text-[10px] px-1.5 py-0.5 rounded"
+                                        style={{ background: 'var(--surface)', color: 'var(--text-3)' }}
+                                      >
+                                        No
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <button
+                                      onClick={() => setDeletingGeneralNoteId(note.id)}
+                                      className="p-1 rounded opacity-0 group-hover:opacity-100 transition-all"
+                                      style={{ color: 'var(--text-3)' }}
+                                      onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--red)')}
+                                      onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-3)')}
+                                      title="Delete"
+                                    >
+                                      <Trash2 size={11} />
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            </>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -441,6 +613,13 @@ export default function ReviewPage() {
                   />
                 </div>
               )}
+
+              {/* Brand Reference */}
+              <BrandReference
+                clientId={submission.client_id}
+                clientName={submission.client_name}
+                contentType={submission.content_type}
+              />
 
               {/* QC Score display for editors */}
               {!isPM && submission.qc_score !== null && (
