@@ -5,6 +5,7 @@ import { scrapeWebsite, scrapeYouTube, formatScrapedData } from '@/lib/dna/scrap
 import { buildDNAPrompt } from '@/lib/dna/prompt'
 import type { GenerateDNARequest } from '@/lib/dna/types'
 
+// DNA generation can take 1-2 minutes depending on scraping + Claude response
 export const maxDuration = 120
 
 export async function POST(req: NextRequest) {
