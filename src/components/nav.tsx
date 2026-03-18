@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useAuth } from '@/hooks/use-auth'
-import { LayoutDashboard, Upload, FileCheck, GitBranch, LogOut } from 'lucide-react'
+import { LayoutDashboard, Upload, FileCheck, GitBranch, LogOut, Dna } from 'lucide-react'
 
 export default function Nav() {
   const pathname = usePathname()
@@ -13,6 +13,7 @@ export default function Nav() {
     ? [
         { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
         { href: '/pipeline', label: 'Pipeline', icon: GitBranch },
+        { href: '/dna', label: 'DNA', icon: Dna },
       ]
     : [
         { href: '/submit', label: 'Submit', icon: Upload },
