@@ -98,6 +98,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Failed to save DNA profile', details: insertError.message }, { status: 500 })
     }
 
+    // Auto-link DNA viewer in PM dashboard's client_settings
+    const dnaViewerUrl = `https://qc.contentcartel.net/dna/${client_id}`
+    await supabase
+      .from('client_settings')
+      .update({ dna_doc_url: dnaViewerUrl })
+      .eq('client_id', client_id)
+
     return NextResponse.json({
       success: true,
       dna: inserted,
