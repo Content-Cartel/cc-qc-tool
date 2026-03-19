@@ -1,7 +1,8 @@
 'use client'
 
 import { getStatusColor, getStatusLabel } from '@/lib/ai/scoring'
-import { CONTENT_TYPE_CONFIG } from '@/lib/constants'
+import { CONTENT_TYPE_CONFIG, EDITING_LEVEL_CONFIG } from '@/lib/constants'
+import type { EditingLevel } from '@/lib/supabase/types'
 
 export function StatusBadge({ status }: { status: string }) {
   return (
@@ -17,6 +18,17 @@ export function ContentTypeBadge({ type }: { type: string }) {
   return (
     <span className={`badge badge-${config.color}`}>
       {config.label}
+    </span>
+  )
+}
+
+export function EditingLevelBadge({ level }: { level: EditingLevel | null }) {
+  if (!level) return null
+  const config = EDITING_LEVEL_CONFIG[level]
+  if (!config) return null
+  return (
+    <span className={`badge badge-${config.color}`} title={config.description}>
+      {config.label} Edit
     </span>
   )
 }

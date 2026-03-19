@@ -42,6 +42,16 @@ export function getGoogleDriveDownloadUrl(url: string): string | null {
 }
 
 /**
+ * Build a direct streaming URL for Google Drive video files.
+ * Works when the file is shared as "Anyone with the link can view".
+ */
+export function getGoogleDriveDirectUrl(url: string): string | null {
+  const fileId = extractGoogleDriveFileId(url)
+  if (!fileId) return null
+  return `https://drive.google.com/uc?export=view&id=${fileId}`
+}
+
+/**
  * Check if a URL is a Google Drive link
  */
 export function isGoogleDriveUrl(url: string): boolean {

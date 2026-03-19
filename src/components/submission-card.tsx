@@ -6,6 +6,7 @@ import { Clock, ArrowRight } from 'lucide-react'
 import { timeAgo } from '@/lib/utils/date'
 import { STATUS_CONFIG, CONTENT_TYPE_CONFIG } from '@/lib/constants'
 import { PipelineStageLabel } from '@/components/pipeline-tracker'
+import { EditingLevelBadge } from '@/components/status-badge'
 import type { QCSubmission } from '@/lib/supabase/types'
 
 interface SubmissionCardProps {
@@ -46,6 +47,7 @@ export default function SubmissionCard({ submission, index = 0 }: SubmissionCard
           <div className="flex flex-wrap gap-1.5 mb-2.5">
             <span className={`badge badge-${status.color}`}>{status.label}</span>
             <span className={`badge badge-${contentType.color}`}>{contentType.label}</span>
+            <EditingLevelBadge level={submission.editing_level} />
             {submission.revision_of && (
               <span className="badge badge-purple">Resubmission</span>
             )}

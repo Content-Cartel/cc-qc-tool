@@ -1,125 +1,237 @@
-import { NextRequest, NextResponse } from 'next/server'
+import { NextRequest } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { createClient } from '@supabase/supabase-js'
-import { scrapeWebsite, scrapeYouTube, formatScrapedData } from '@/lib/dna/scraper'
+import { scrapeWebsiteMultiPage, fetchYouTubeData, formatScrapedData } from '@/lib/dna/scraper'
 import { buildDNAPrompt } from '@/lib/dna/prompt'
-import type { GenerateDNARequest } from '@/lib/dna/types'
+import type { GenerateDNARequest, DNASources } from '@/lib/dna/types'
 
-// DNA generation can take 1-2 minutes depending on scraping + Claude response
-export const maxDuration = 120
+export const maxDuration = 180
 
+/**
+ * Streaming DNA generation endpoint.
+ * Sends SSE events: progress stages → streamed DNA text → final saved result.
+ * Enhanced with data quality tracking and richer source metadata.
+ */
 export async function POST(req: NextRequest) {
-  try {
-    const body: GenerateDNARequest = await req.json()
-    const { client_id, client_name, website_url, youtube_url, context, transcript } = body
+  const body: GenerateDNARequest = await req.json()
+  const { client_id, client_name, website_url, youtube_url, context, transcript } = body
 
-    if (!client_id || !client_name) {
-      return NextResponse.json({ error: 'client_id and client_name are required' }, { status: 400 })
-    }
-
-    if (!website_url && !youtube_url && !context && !transcript) {
-      return NextResponse.json({ error: 'At least one data source is required (website, youtube, context, or transcript)' }, { status: 400 })
-    }
-
-    const anthropicKey = process.env.ANTHROPIC_API_KEY
-    if (!anthropicKey || anthropicKey === 'your-anthropic-api-key-here') {
-      return NextResponse.json({ error: 'ANTHROPIC_API_KEY not configured on server' }, { status: 500 })
-    }
-
-    // Scrape data sources in parallel
-    const [websiteData, youtubeData] = await Promise.all([
-      website_url ? scrapeWebsite(website_url) : null,
-      youtube_url ? scrapeYouTube(youtube_url) : null,
-    ])
-
-    const scrapedData = formatScrapedData(websiteData, youtubeData, context, transcript)
-
-    if (!scrapedData.trim()) {
-      return NextResponse.json({ error: 'Could not scrape any data from provided sources' }, { status: 422 })
-    }
-
-    // Generate DNA with Claude
-    const anthropic = new Anthropic({ apiKey: anthropicKey })
-    const prompt = buildDNAPrompt(client_name, scrapedData)
-
-    const message = await anthropic.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 4096,
-      messages: [{ role: 'user', content: prompt }],
-    })
-
-    const dnaMarkdown = message.content
-      .filter(block => block.type === 'text')
-      .map(block => (block as { type: 'text'; text: string }).text)
-      .join('\n')
-
-    if (!dnaMarkdown) {
-      return NextResponse.json({ error: 'Failed to generate DNA profile' }, { status: 500 })
-    }
-
-    // Store in Supabase
-    const supabase = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-    )
-
-    // Get current max version for this client
-    const { data: existing } = await supabase
-      .from('client_dna')
-      .select('version')
-      .eq('client_id', client_id)
-      .order('version', { ascending: false })
-      .limit(1)
-      .maybeSingle()
-
-    const nextVersion = (existing?.version || 0) + 1
-
-    const { data: inserted, error: insertError } = await supabase
-      .from('client_dna')
-      .insert({
-        client_id,
-        dna_markdown: dnaMarkdown,
-        sources: {
-          website_data: websiteData ? `Scraped from ${website_url}` : null,
-          youtube_data: youtubeData ? `Scraped from ${youtube_url}` : null,
-          transcript_excerpt: transcript ? transcript.slice(0, 200) + '...' : null,
-        },
-        generated_by: body.client_name,
-        version: nextVersion,
-        website_url: website_url || null,
-        youtube_url: youtube_url || null,
-        context: context || null,
-      })
-      .select()
-      .single()
-
-    if (insertError) {
-      console.error('Supabase insert error:', insertError)
-      return NextResponse.json({ error: 'Failed to save DNA profile', details: insertError.message }, { status: 500 })
-    }
-
-    // Auto-link DNA viewer in PM dashboard's client_settings
-    const dnaViewerUrl = `https://qc.contentcartel.net/dna/${client_id}`
-    await supabase
-      .from('client_settings')
-      .update({ dna_doc_url: dnaViewerUrl })
-      .eq('client_id', client_id)
-
-    return NextResponse.json({
-      success: true,
-      dna: inserted,
-      sources: {
-        website: websiteData ? 'scraped' : 'skipped',
-        youtube: youtubeData ? 'scraped' : 'skipped',
-        context: context ? 'provided' : 'none',
-        transcript: transcript ? 'provided' : 'none',
-      },
-    })
-  } catch (error) {
-    console.error('DNA generation error:', error)
-    return NextResponse.json(
-      { error: 'Internal server error', details: error instanceof Error ? error.message : 'Unknown error' },
-      { status: 500 },
-    )
+  // Validation
+  if (!client_id || !client_name) {
+    return Response.json({ error: 'client_id and client_name are required' }, { status: 400 })
   }
+  if (!website_url && !youtube_url && !context && !transcript) {
+    return Response.json({ error: 'At least one data source is required' }, { status: 400 })
+  }
+
+  const anthropicKey = process.env.CC_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY
+  if (!anthropicKey || anthropicKey === 'your-anthropic-api-key-here') {
+    return Response.json({ error: 'ANTHROPIC_API_KEY not configured on server' }, { status: 500 })
+  }
+
+  const encoder = new TextEncoder()
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      function sendEvent(type: string, data: Record<string, unknown>) {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type, ...data })}\n\n`))
+      }
+
+      try {
+        // Stage 1: Scrape data sources
+        sendEvent('progress', { stage: 'scraping', message: 'Collecting data sources...' })
+
+        let websiteData = null
+        let youtubeData = null
+
+        if (website_url) {
+          sendEvent('progress', { stage: 'scraping_website', message: `Scraping ${website_url}...` })
+          websiteData = await scrapeWebsiteMultiPage(website_url)
+          const pageCount = websiteData?.pages.length || 0
+          const totalChars = websiteData?.totalChars || 0
+          const attempted = websiteData?.pagesAttempted || []
+          sendEvent('progress', {
+            stage: 'website_done',
+            message: `Scraped ${pageCount} page${pageCount !== 1 ? 's' : ''} (${totalChars.toLocaleString()} chars)`,
+            pages: websiteData?.pages.map(p => ({
+              type: p.pageType,
+              url: p.url,
+              chars: p.charCount,
+              headings: p.headings.length,
+              ctas: p.ctas.length,
+            })) || [],
+            attempted: attempted.map(a => ({
+              pageType: a.pageType,
+              status: a.status,
+            })),
+            totalChars,
+          })
+        }
+
+        if (youtube_url) {
+          sendEvent('progress', { stage: 'scraping_youtube', message: `Fetching YouTube data...` })
+          youtubeData = await fetchYouTubeData(youtube_url)
+          const videoCount = youtubeData?.raw?.videos.length || 0
+          const withDescriptions = youtubeData?.raw?.videos.filter(v => v.description.length > 10).length || 0
+          const withTags = youtubeData?.raw?.videos.filter(v => v.tags.length > 0).length || 0
+          const playlistCount = youtubeData?.raw?.playlists?.length || 0
+          sendEvent('progress', {
+            stage: 'youtube_done',
+            message: youtubeData
+              ? `Fetched ${videoCount} videos via ${youtubeData.type === 'api' ? 'YouTube API' : 'HTML scrape'}`
+              : 'Could not fetch YouTube data',
+            type: youtubeData?.type || 'none',
+            videoCount,
+            withDescriptions,
+            withTags,
+            playlistCount,
+            channelName: youtubeData?.raw?.channel.name || null,
+            subscribers: youtubeData?.raw?.channel.subscriberCount || null,
+          })
+        }
+
+        const scrapedData = formatScrapedData(websiteData, youtubeData, context, transcript)
+
+        if (!scrapedData.trim()) {
+          sendEvent('error', { message: 'Could not scrape any data from provided sources' })
+          controller.close()
+          return
+        }
+
+        // Calculate total source words for quality indicator
+        const totalSourceWords = scrapedData.split(/\s+/).length
+        sendEvent('progress', {
+          stage: 'data_ready',
+          message: `${totalSourceWords.toLocaleString()} words of source data collected`,
+          totalSourceWords,
+        })
+
+        // Stage 2: Generate DNA with Claude (streaming)
+        sendEvent('progress', { stage: 'generating', message: 'Generating DNA profile with Claude...' })
+
+        const model = process.env.DNA_MODEL || 'claude-sonnet-4-20250514'
+        const anthropic = new Anthropic({ apiKey: anthropicKey })
+        const prompt = buildDNAPrompt(client_name, scrapedData)
+
+        let fullMarkdown = ''
+
+        const messageStream = anthropic.messages.stream({
+          model,
+          max_tokens: 12000,
+          messages: [{ role: 'user', content: prompt }],
+        })
+
+        for await (const event of messageStream) {
+          if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+            const text = event.delta.text
+            fullMarkdown += text
+            sendEvent('chunk', { text })
+          }
+        }
+
+        if (!fullMarkdown) {
+          sendEvent('error', { message: 'Failed to generate DNA profile' })
+          controller.close()
+          return
+        }
+
+        // Stage 3: Save to Supabase
+        sendEvent('progress', { stage: 'saving', message: 'Saving DNA profile...' })
+
+        const transcriptWordCount = transcript ? transcript.split(/\s+/).length : 0
+
+        const sources: DNASources = {
+          website_data: websiteData ? `Scraped ${websiteData.pages.length} pages from ${website_url}` : null,
+          website_pages_scraped: websiteData?.pages.map(p => `${p.pageType}: ${p.url}`) || undefined,
+          website_pages_attempted: websiteData?.pagesAttempted || undefined,
+          website_total_chars: websiteData?.totalChars || undefined,
+          youtube_data: youtubeData ? `${youtubeData.type === 'api' ? 'YouTube Data API' : 'HTML scrape'} from ${youtube_url}` : null,
+          youtube_source_type: youtubeData?.type || undefined,
+          youtube_api_data: youtubeData?.raw || undefined,
+          youtube_videos_analyzed: youtubeData?.raw?.videos.length || undefined,
+          youtube_videos_with_descriptions: youtubeData?.raw?.videos.filter(v => v.description.length > 10).length || undefined,
+          youtube_videos_with_tags: youtubeData?.raw?.videos.filter(v => v.tags.length > 0).length || undefined,
+          youtube_playlists_found: youtubeData?.raw?.playlists?.length || undefined,
+          transcript_excerpt: transcript ? transcript.slice(0, 500) + '...' : null,
+          transcript_word_count: transcriptWordCount || undefined,
+          context_provided: !!context,
+          total_source_words: totalSourceWords,
+          model_used: model,
+        }
+
+        const supabase = createClient(
+          process.env.NEXT_PUBLIC_SUPABASE_URL!,
+          process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        )
+
+        const { data: existing } = await supabase
+          .from('client_dna')
+          .select('version')
+          .eq('client_id', client_id)
+          .order('version', { ascending: false })
+          .limit(1)
+          .maybeSingle()
+
+        const nextVersion = (existing?.version || 0) + 1
+
+        const { data: inserted, error: insertError } = await supabase
+          .from('client_dna')
+          .insert({
+            client_id,
+            dna_markdown: fullMarkdown,
+            sources,
+            generated_by: client_name,
+            version: nextVersion,
+            website_url: website_url || null,
+            youtube_url: youtube_url || null,
+            context: context || null,
+          })
+          .select()
+          .single()
+
+        if (insertError) {
+          sendEvent('error', { message: 'Failed to save DNA profile', details: insertError.message })
+          controller.close()
+          return
+        }
+
+        // Auto-link DNA viewer in PM dashboard
+        const dnaViewerUrl = `https://qc.contentcartel.net/dna/${client_id}`
+        await supabase
+          .from('client_settings')
+          .update({ dna_doc_url: dnaViewerUrl })
+          .eq('client_id', client_id)
+
+        sendEvent('complete', {
+          dna_id: inserted.id,
+          version: nextVersion,
+          client_id,
+          sources: {
+            website: websiteData ? `${websiteData.pages.length} pages (${websiteData.totalChars.toLocaleString()} chars)` : 'skipped',
+            youtube: youtubeData ? `${youtubeData.type} — ${youtubeData.raw?.videos.length || 0} videos, ${youtubeData.raw?.playlists?.length || 0} playlists` : 'skipped',
+            context: context ? 'provided' : 'none',
+            transcript: transcript ? `provided (${transcriptWordCount.toLocaleString()} words)` : 'none',
+            total_source_words: totalSourceWords,
+            model,
+          },
+        })
+
+        controller.close()
+      } catch (error) {
+        sendEvent('error', {
+          message: 'Internal server error',
+          details: error instanceof Error ? error.message : 'Unknown error',
+        })
+        controller.close()
+      }
+    },
+  })
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+    },
+  })
 }

@@ -4,6 +4,7 @@ import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useAuth } from '@/hooks/use-auth'
 import { LayoutDashboard, Upload, FileCheck, GitBranch, LogOut, Dna } from 'lucide-react'
+import NotificationDropdown from '@/components/notification-dropdown'
 
 export default function Nav() {
   const pathname = usePathname()
@@ -61,6 +62,7 @@ export default function Nav() {
 
           {/* Right side */}
           <div className="flex items-center gap-3">
+            <NotificationDropdown />
             <span className="text-xs" style={{ color: 'var(--text-3)' }}>
               {user}
             </span>

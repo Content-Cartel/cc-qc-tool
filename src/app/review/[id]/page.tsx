@@ -3,9 +3,9 @@
 import { useState, useEffect, useCallback } from 'react'
 import { useRouter, useParams } from 'next/navigation'
 import { motion } from 'framer-motion'
-import { ArrowLeft, ExternalLink, User, Calendar, Hash, RefreshCw, Trash2, Pencil, X } from 'lucide-react'
+import { ArrowLeft, ExternalLink, User, Calendar, Hash, RefreshCw, Trash2, Pencil, X, ChevronDown } from 'lucide-react'
 import Nav from '@/components/nav'
-import { StatusBadge, ContentTypeBadge } from '@/components/status-badge'
+import { StatusBadge, ContentTypeBadge, EditingLevelBadge } from '@/components/status-badge'
 import { PipelineStageLabel } from '@/components/pipeline-tracker'
 import PipelineTracker from '@/components/pipeline-tracker'
 import QCChecklist from '@/components/qc-checklist'
@@ -15,9 +15,9 @@ import { createClient } from '@/lib/supabase/client'
 import { useAuth } from '@/hooks/use-auth'
 import { timeAgo, formatDateTime } from '@/lib/utils/date'
 import { getGoogleDriveEmbedUrl } from '@/lib/utils/google-drive'
-import { NOTE_CATEGORIES } from '@/lib/constants'
+import { NOTE_CATEGORIES, STATUS_CONFIG, EDITING_LEVEL_CONFIG } from '@/lib/constants'
 import type { QCChecklistKey, PipelineStageKey } from '@/lib/constants'
-import type { QCNote, NoteCategory, QCChecklistResult } from '@/lib/supabase/types'
+import type { QCNote, NoteCategory, QCChecklistResult, EditingLevel, SubmissionStatus } from '@/lib/supabase/types'
 
 interface SubmissionDetail {
   id: string
@@ -34,6 +34,7 @@ interface SubmissionDetail {
   client_id: number
   client_name: string
   current_pipeline_stage: PipelineStageKey
+  editing_level: EditingLevel | null
   deadline: string | null
   qc_score: number | null
   created_at: string
@@ -235,6 +236,38 @@ export default function ReviewPage() {
     await loadSubmission()
   }
 
+  async function handleStatusChange(newStatus: SubmissionStatus) {
+    if (!submission || submission.status === newStatus) return
+    const statusLabel = STATUS_CONFIG[newStatus]?.label || newStatus
+    await supabase
+      .from('qc_submissions')
+      .update({
+        status: newStatus,
+        pm_reviewed_by_name: userName,
+        pm_reviewed_at: new Date().toISOString(),
+      })
+      .eq('id', submissionId)
+
+    // Notify the editor
+    await supabase.from('notifications').insert({
+      user_name: submission.submitted_by_name,
+      submission_id: submissionId,
+      message: `Your video "${submission.title}" status changed to ${statusLabel}`,
+      type: 'status_change',
+    })
+
+    await loadSubmission()
+  }
+
+  async function handleEditingLevelChange(level: EditingLevel) {
+    if (!submission) return
+    await supabase
+      .from('qc_submissions')
+      .update({ editing_level: level })
+      .eq('id', submissionId)
+    await loadSubmission()
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen" style={{ background: 'var(--bg)' }}>
@@ -319,8 +352,28 @@ export default function ReviewPage() {
                 )}
               </h1>
               <div className="flex items-center gap-2 mt-2 flex-wrap">
-                <StatusBadge status={submission.status} />
+                {isPM ? (
+                  <div className="relative inline-flex items-center">
+                    <select
+                      value={submission.status}
+                      onChange={(e) => handleStatusChange(e.target.value as SubmissionStatus)}
+                      className="appearance-none text-xs font-medium px-2.5 py-1 pr-6 rounded-full cursor-pointer border-0 outline-none"
+                      style={{
+                        background: `var(--${STATUS_CONFIG[submission.status as keyof typeof STATUS_CONFIG]?.color || 'blue'})`,
+                        color: '#fff',
+                      }}
+                    >
+                      {Object.entries(STATUS_CONFIG).map(([key, cfg]) => (
+                        <option key={key} value={key} style={{ color: '#000' }}>{cfg.label}</option>
+                      ))}
+                    </select>
+                    <ChevronDown size={10} className="absolute right-1.5 pointer-events-none" style={{ color: '#fff' }} />
+                  </div>
+                ) : (
+                  <StatusBadge status={submission.status} />
+                )}
                 <ContentTypeBadge type={submission.content_type} />
+                <EditingLevelBadge level={submission.editing_level} />
                 {submission.current_pipeline_stage && (
                   <PipelineStageLabel stage={submission.current_pipeline_stage} />
                 )}
@@ -636,6 +689,37 @@ export default function ReviewPage() {
                     <p className="text-xs mt-1" style={{ color: 'var(--text-3)' }}>
                       {submission.qc_score >= 10 ? 'All checks passed' : `${10 - submission.qc_score} item(s) failed`}
                     </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Editing Level (PM only) */}
+              {isPM && (
+                <div className="card p-4">
+                  <h3 className="text-xs font-medium uppercase tracking-wider mb-3" style={{ color: 'var(--text-3)' }}>
+                    Editing Level
+                  </h3>
+                  <div className="space-y-1.5">
+                    {(Object.entries(EDITING_LEVEL_CONFIG) as [EditingLevel, typeof EDITING_LEVEL_CONFIG[EditingLevel]][]).map(([key, cfg]) => (
+                      <button
+                        key={key}
+                        onClick={() => handleEditingLevelChange(key)}
+                        className="w-full text-left px-3 py-2 rounded-lg text-xs transition-all flex items-center justify-between"
+                        style={{
+                          background: submission.editing_level === key ? 'var(--surface-2)' : 'transparent',
+                          border: submission.editing_level === key ? `1px solid var(--${cfg.color})` : '1px solid transparent',
+                          color: submission.editing_level === key ? 'var(--text)' : 'var(--text-3)',
+                        }}
+                      >
+                        <div>
+                          <span className="font-medium">{cfg.label}</span>
+                          <span className="ml-2 opacity-70">{cfg.description}</span>
+                        </div>
+                        {submission.editing_level === key && (
+                          <span className="text-[10px] font-semibold" style={{ color: `var(--${cfg.color})` }}>Active</span>
+                        )}
+                      </button>
+                    ))}
                   </div>
                 </div>
               )}

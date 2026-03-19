@@ -32,7 +32,16 @@ export const STATUS_CONFIG = {
   approved: { label: 'Approved', color: 'green' },
   revision_requested: { label: 'Revision Requested', color: 'red' },
   resubmitted: { label: 'Resubmitted', color: 'blue' },
+  follow_up: { label: 'Follow Up', color: 'purple' },
 } as const
+
+export const EDITING_LEVEL_CONFIG = {
+  minimal: { label: 'Minimal', color: 'green', description: 'Podcast-style, light cuts' },
+  normal: { label: 'Normal', color: 'blue', description: 'Standard editing' },
+  high: { label: 'High', color: 'red', description: 'Dynamic talking-head, strong storytelling' },
+} as const
+
+export type EditingLevelKey = keyof typeof EDITING_LEVEL_CONFIG
 
 export const CONTENT_TYPE_CONFIG = {
   lf_video: { label: 'LF Video', color: 'gold' },

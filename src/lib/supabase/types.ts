@@ -1,8 +1,9 @@
 export type UserRole = 'editor' | 'pm' | 'admin'
 export type ContentType = 'lf_video' | 'sf_video'
-export type SubmissionStatus = 'pending' | 'in_review' | 'approved' | 'revision_requested' | 'resubmitted'
+export type SubmissionStatus = 'pending' | 'in_review' | 'approved' | 'revision_requested' | 'resubmitted' | 'follow_up'
 export type NoteCategory = 'brand' | 'technical' | 'creative' | 'copy' | 'audio' | 'other'
 export type PipelineStageKey = 'raw_footage' | 'ai_auto_clean' | 'ai_auto_cut' | 'transcript_instructions' | 'editor_polish' | 'qc_review' | 'package' | 'publish'
+export type EditingLevel = 'minimal' | 'normal' | 'high'
 
 export interface QCSubmission {
   id: string
@@ -19,6 +20,7 @@ export interface QCSubmission {
   revision_of: string | null
   revision_count: number
   current_pipeline_stage: PipelineStageKey
+  editing_level: EditingLevel | null
   deadline: string | null
   qc_score: number | null
   created_at: string
@@ -58,6 +60,16 @@ export interface QCChecklistResult {
   total_items: number
   overall_pass: boolean
   notes: string | null
+  created_at: string
+}
+
+export interface Notification {
+  id: string
+  user_name: string
+  submission_id: string | null
+  message: string
+  type: string
+  is_read: boolean
   created_at: string
 }
 

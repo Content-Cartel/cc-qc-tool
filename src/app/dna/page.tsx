@@ -2,39 +2,31 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { motion } from 'framer-motion'
-import { Dna, Plus, Check, Clock, AlertCircle, ExternalLink, RefreshCw, X } from 'lucide-react'
+import { Dna, Check, Clock, AlertCircle, ExternalLink, RefreshCw, Zap } from 'lucide-react'
 import Link from 'next/link'
 import Nav from '@/components/nav'
 import { createClient } from '@/lib/supabase/client'
 import type { ClientDNA } from '@/lib/dna/types'
+import { parseDNASections } from '@/lib/dna/parser'
 
 interface ClientWithDNA {
   id: number
   name: string
   phase: string
   latestDna: ClientDNA | null
+  healthScore: number | null
+  highConfCount: number
+  totalSections: number
 }
 
 export default function DNADashboardPage() {
   const supabase = createClient()
   const [clients, setClients] = useState<ClientWithDNA[]>([])
   const [loading, setLoading] = useState(true)
-  const [showModal, setShowModal] = useState(false)
-  const [selectedClient, setSelectedClient] = useState<{ id: number; name: string } | null>(null)
-  const [generating, setGenerating] = useState(false)
-  const [error, setError] = useState('')
-  const [success, setSuccess] = useState('')
-
-  // Form fields
-  const [websiteUrl, setWebsiteUrl] = useState('')
-  const [youtubeUrl, setYoutubeUrl] = useState('')
-  const [context, setContext] = useState('')
-  const [transcript, setTranscript] = useState('')
 
   const loadClients = useCallback(async () => {
     setLoading(true)
 
-    // Load clients
     const { data: clientData } = await supabase
       .from('clients')
       .select('id, name, phase')
@@ -46,13 +38,11 @@ export default function DNADashboardPage() {
       return
     }
 
-    // Load latest DNA for each client
     const { data: dnaData } = await supabase
       .from('client_dna')
       .select('*')
       .order('version', { ascending: false })
 
-    // Map: keep only latest version per client
     const dnaByClient = new Map<number, ClientDNA>()
     if (dnaData) {
       for (const dna of dnaData) {
@@ -62,82 +52,40 @@ export default function DNADashboardPage() {
       }
     }
 
-    setClients(clientData.map(c => ({
-      ...c,
-      latestDna: dnaByClient.get(c.id) || null,
-    })))
+    setClients(clientData.map(c => {
+      const latestDna = dnaByClient.get(c.id) || null
+      let healthScore: number | null = null
+      let highConfCount = 0
+      let totalSections = 0
+
+      if (latestDna?.dna_markdown) {
+        const parsed = parseDNASections(latestDna.dna_markdown)
+        healthScore = parsed.overallScore
+        highConfCount = parsed.highConfCount
+        totalSections = parsed.sections.length
+      }
+
+      return { ...c, latestDna, healthScore, highConfCount, totalSections }
+    }))
     setLoading(false)
   }, [supabase])
 
   useEffect(() => { loadClients() }, [loadClients])
 
-  function openGenerateModal(client: { id: number; name: string }, existingDna?: ClientDNA | null) {
-    setSelectedClient(client)
-    setWebsiteUrl(existingDna?.website_url || '')
-    setYoutubeUrl(existingDna?.youtube_url || '')
-    setContext(existingDna?.context || '')
-    setTranscript('')
-    setError('')
-    setSuccess('')
-    setShowModal(true)
-  }
-
-  async function handleGenerate() {
-    if (!selectedClient) return
-    if (!websiteUrl && !youtubeUrl && !context && !transcript) {
-      setError('Provide at least one data source')
-      return
-    }
-
-    setGenerating(true)
-    setError('')
-    setSuccess('')
-
-    try {
-      const res = await fetch('/api/dna/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          client_id: selectedClient.id,
-          client_name: selectedClient.name,
-          website_url: websiteUrl || undefined,
-          youtube_url: youtubeUrl || undefined,
-          context: context || undefined,
-          transcript: transcript || undefined,
-        }),
-      })
-
-      const data = await res.json()
-
-      if (!res.ok) {
-        setError(data.error || 'Generation failed')
-        setGenerating(false)
-        return
-      }
-
-      setSuccess('DNA profile generated successfully!')
-      setGenerating(false)
-      await loadClients()
-
-      // Auto-close after success
-      setTimeout(() => {
-        setShowModal(false)
-        setSuccess('')
-      }, 1500)
-    } catch {
-      setError('Network error — try again')
-      setGenerating(false)
-    }
-  }
-
   const withDna = clients.filter(c => c.latestDna)
   const withoutDna = clients.filter(c => !c.latestDna)
+
+  function getScoreColor(score: number) {
+    if (score > 70) return 'var(--green)'
+    if (score > 40) return 'var(--amber)'
+    return 'var(--red)'
+  }
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg)' }}>
       <Nav />
 
-      <main className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
+      <main className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
         {/* Header */}
         <div className="flex items-center justify-between mb-6">
           <div>
@@ -158,10 +106,28 @@ export default function DNADashboardPage() {
           </button>
         </div>
 
+        {/* Stats bar */}
+        {!loading && clients.length > 0 && (
+          <div className="grid grid-cols-3 gap-3 mb-6">
+            <div className="card p-3 text-center">
+              <p className="text-2xl font-bold" style={{ color: 'var(--text)' }}>{clients.length}</p>
+              <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-3)' }}>Total Clients</p>
+            </div>
+            <div className="card p-3 text-center">
+              <p className="text-2xl font-bold" style={{ color: 'var(--green)' }}>{withDna.length}</p>
+              <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-3)' }}>DNA Generated</p>
+            </div>
+            <div className="card p-3 text-center">
+              <p className="text-2xl font-bold" style={{ color: 'var(--amber)' }}>{withoutDna.length}</p>
+              <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-3)' }}>Needs DNA</p>
+            </div>
+          </div>
+        )}
+
         {loading ? (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {[1, 2, 3, 4, 5, 6].map(i => (
-              <div key={i} className="card p-4 animate-shimmer h-32" />
+              <div key={i} className="card p-4 animate-shimmer h-36" />
             ))}
           </div>
         ) : (
@@ -181,9 +147,9 @@ export default function DNADashboardPage() {
                       animate={{ opacity: 1, y: 0 }}
                       transition={{ delay: i * 0.03 }}
                     >
-                      <div
-                        className="card p-4 cursor-pointer"
-                        onClick={() => openGenerateModal(client)}
+                      <Link
+                        href={`/dna/generate/${client.id}`}
+                        className="card p-4 block group"
                         style={{ borderColor: 'rgba(245, 158, 11, 0.3)' }}
                       >
                         <div className="flex items-center justify-between mb-2">
@@ -192,11 +158,11 @@ export default function DNADashboardPage() {
                           </span>
                           <span className="badge badge-neutral text-[10px]">{client.phase}</span>
                         </div>
-                        <button className="flex items-center gap-1.5 text-xs font-medium mt-2" style={{ color: 'var(--gold)' }}>
-                          <Plus size={12} />
+                        <div className="flex items-center gap-1.5 text-xs font-medium mt-2 group-hover:gap-2 transition-all" style={{ color: 'var(--gold)' }}>
+                          <Zap size={12} />
                           Generate DNA
-                        </button>
-                      </div>
+                        </div>
+                      </Link>
                     </motion.div>
                   ))}
                 </div>
@@ -223,12 +189,45 @@ export default function DNADashboardPage() {
                           <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>
                             {client.name}
                           </span>
-                          <span className="badge badge-green text-[10px]">v{client.latestDna!.version}</span>
+                          <div className="flex items-center gap-1.5">
+                            {client.healthScore !== null && (
+                              <span
+                                className="text-[10px] font-bold px-1.5 py-0.5 rounded"
+                                style={{
+                                  color: getScoreColor(client.healthScore),
+                                  background: `color-mix(in srgb, ${getScoreColor(client.healthScore)} 15%, transparent)`,
+                                }}
+                              >
+                                {client.healthScore}%
+                              </span>
+                            )}
+                            <span className="badge badge-green text-[10px]">v{client.latestDna!.version}</span>
+                          </div>
                         </div>
+
+                        {/* Health bar */}
+                        {client.healthScore !== null && (
+                          <div className="mb-3">
+                            <div className="flex items-center justify-between text-[10px] mb-1" style={{ color: 'var(--text-3)' }}>
+                              <span>{client.highConfCount}/{client.totalSections} sections confident</span>
+                            </div>
+                            <div className="h-1 rounded-full overflow-hidden" style={{ background: 'var(--surface-2)' }}>
+                              <div
+                                className="h-full rounded-full transition-all duration-500"
+                                style={{
+                                  width: `${client.healthScore}%`,
+                                  background: getScoreColor(client.healthScore),
+                                }}
+                              />
+                            </div>
+                          </div>
+                        )}
+
                         <div className="text-[10px] mb-3" style={{ color: 'var(--text-3)' }}>
                           <Clock size={10} className="inline mr-1" />
                           {new Date(client.latestDna!.created_at).toLocaleDateString()}
                         </div>
+
                         <div className="flex items-center gap-2">
                           <Link
                             href={`/dna/${client.id}`}
@@ -238,14 +237,14 @@ export default function DNADashboardPage() {
                             <ExternalLink size={11} />
                             View
                           </Link>
-                          <button
-                            onClick={() => openGenerateModal(client, client.latestDna)}
+                          <Link
+                            href={`/dna/generate/${client.id}`}
                             className="flex items-center gap-1 text-xs font-medium"
                             style={{ color: 'var(--text-3)' }}
                           >
                             <RefreshCw size={11} />
                             Regenerate
-                          </button>
+                          </Link>
                         </div>
                       </div>
                     </motion.div>
@@ -263,118 +262,6 @@ export default function DNADashboardPage() {
           </>
         )}
       </main>
-
-      {/* Generate Modal */}
-      {showModal && selectedClient && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4" style={{ background: 'rgba(0,0,0,0.7)' }}>
-          <motion.div
-            initial={{ opacity: 0, scale: 0.95 }}
-            animate={{ opacity: 1, scale: 1 }}
-            className="card p-6 w-full max-w-lg max-h-[85vh] overflow-y-auto"
-          >
-            <div className="flex items-center justify-between mb-5">
-              <h2 className="text-base font-bold flex items-center gap-2" style={{ color: 'var(--text)' }}>
-                <Dna size={16} style={{ color: 'var(--gold)' }} />
-                Generate DNA — {selectedClient.name}
-              </h2>
-              <button onClick={() => setShowModal(false)} className="p-1 rounded hover:bg-[var(--surface-2)]">
-                <X size={16} style={{ color: 'var(--text-3)' }} />
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              <div>
-                <label className="label">Website URL</label>
-                <input
-                  type="url"
-                  className="input text-xs"
-                  placeholder="https://example.com"
-                  value={websiteUrl}
-                  onChange={e => setWebsiteUrl(e.target.value)}
-                  disabled={generating}
-                />
-              </div>
-
-              <div>
-                <label className="label">YouTube Channel URL</label>
-                <input
-                  type="url"
-                  className="input text-xs"
-                  placeholder="https://youtube.com/@channel"
-                  value={youtubeUrl}
-                  onChange={e => setYoutubeUrl(e.target.value)}
-                  disabled={generating}
-                />
-              </div>
-
-              <div>
-                <label className="label">Additional Context</label>
-                <textarea
-                  className="input text-xs"
-                  rows={3}
-                  placeholder="Key info about the client — niche, CEO name, target audience, anything editors should know..."
-                  value={context}
-                  onChange={e => setContext(e.target.value)}
-                  disabled={generating}
-                />
-              </div>
-
-              <div>
-                <label className="label">
-                  Onboarding Transcript
-                  <span className="text-[10px] ml-1 font-normal" style={{ color: 'var(--text-3)' }}>(optional but powerful)</span>
-                </label>
-                <textarea
-                  className="input text-xs"
-                  rows={4}
-                  placeholder="Paste onboarding call transcript here..."
-                  value={transcript}
-                  onChange={e => setTranscript(e.target.value)}
-                  disabled={generating}
-                />
-              </div>
-
-              {error && (
-                <div className="flex items-center gap-2 text-xs p-3 rounded-lg" style={{ background: 'rgba(239,68,68,0.1)', color: 'var(--red)' }}>
-                  <AlertCircle size={14} />
-                  {error}
-                </div>
-              )}
-
-              {success && (
-                <div className="flex items-center gap-2 text-xs p-3 rounded-lg" style={{ background: 'rgba(34,197,94,0.1)', color: 'var(--green)' }}>
-                  <Check size={14} />
-                  {success}
-                </div>
-              )}
-
-              <button
-                onClick={handleGenerate}
-                disabled={generating}
-                className="btn-primary w-full text-sm flex items-center justify-center gap-2"
-              >
-                {generating ? (
-                  <>
-                    <RefreshCw size={14} className="animate-spin" />
-                    Generating DNA... (1-2 min)
-                  </>
-                ) : (
-                  <>
-                    <Dna size={14} />
-                    Generate DNA Profile
-                  </>
-                )}
-              </button>
-
-              {generating && (
-                <p className="text-[10px] text-center" style={{ color: 'var(--text-3)' }}>
-                  Scraping website + YouTube, then sending to Claude for analysis. This can take up to 2 minutes.
-                </p>
-              )}
-            </div>
-          </motion.div>
-        </div>
-      )}
     </div>
   )
 }
