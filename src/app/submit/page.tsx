@@ -8,6 +8,7 @@ import Nav from '@/components/nav'
 import { createClient } from '@/lib/supabase/client'
 import { useAuth } from '@/hooks/use-auth'
 import type { ContentType } from '@/lib/supabase/types'
+import { notifyAgent } from '@/lib/notify-agent'
 
 interface ClientOption {
   id: number
@@ -100,6 +101,18 @@ function SubmitForm() {
       const { error: insertError } = await supabase.from('qc_submissions').insert(payload)
 
       if (insertError) { setError(`Submission failed: ${insertError.message}`); setSubmitting(false); return }
+
+      // Notify the AI agent about new submission
+      if (clientId) {
+        notifyAgent({
+          event: 'qc_ready',
+          client_id: clientId as number,
+          submission_id: 'new',
+          file_name: title.trim(),
+          uploader: userName,
+          content_type: contentType,
+        })
+      }
 
       // If resubmission, update original's revision count
       if (revisionOf) {

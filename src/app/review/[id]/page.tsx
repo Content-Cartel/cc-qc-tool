@@ -18,6 +18,7 @@ import { getGoogleDriveEmbedUrl } from '@/lib/utils/google-drive'
 import { NOTE_CATEGORIES, STATUS_CONFIG, EDITING_LEVEL_CONFIG } from '@/lib/constants'
 import type { QCChecklistKey, PipelineStageKey } from '@/lib/constants'
 import type { QCNote, NoteCategory, QCChecklistResult, EditingLevel, SubmissionStatus } from '@/lib/supabase/types'
+import { notifyAgent } from '@/lib/notify-agent'
 
 interface SubmissionDetail {
   id: string
@@ -210,6 +211,23 @@ export default function ReviewPage() {
       })
       .eq('id', submissionId)
 
+    // Notify the AI agent about QC result
+    if (submission) {
+      const failedItems = Object.entries(results)
+        .filter(([, passed]) => !passed)
+        .map(([key]) => key.replace(/_/g, ' '))
+      notifyAgent({
+        event: 'qc_done',
+        client_id: submission.client_id,
+        submission_id: submissionId,
+        result: overallPass ? 'approved' : 'revision_requested',
+        notes: overallPass
+          ? [`Passed QC: ${passedCount}/10`]
+          : [`Failed items: ${failedItems.join(', ')}`],
+        content_title: submission.title,
+      })
+    }
+
     await loadSubmission()
     await loadChecklist()
     setActionLoading(false)
@@ -233,6 +251,18 @@ export default function ReviewPage() {
       // Table may not exist yet
     }
 
+    // Notify the AI agent about stage change
+    if (submission) {
+      notifyAgent({
+        event: 'stage_change',
+        client_id: submission.client_id,
+        submission_id: submissionId,
+        from: submission.current_pipeline_stage,
+        to: nextStage,
+        content_title: submission.title,
+      })
+    }
+
     await loadSubmission()
   }
 
@@ -254,6 +284,16 @@ export default function ReviewPage() {
       submission_id: submissionId,
       message: `Your video "${submission.title}" status changed to ${statusLabel}`,
       type: 'status_change',
+    })
+
+    // Notify the AI agent
+    notifyAgent({
+      event: 'qc_done',
+      client_id: submission.client_id,
+      submission_id: submissionId,
+      result: newStatus,
+      notes: [`Status manually changed to ${statusLabel} by ${userName}`],
+      content_title: submission.title,
     })
 
     await loadSubmission()
