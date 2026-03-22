@@ -1,9 +1,10 @@
 import { NextRequest } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { createClient } from '@supabase/supabase-js'
-import { scrapeWebsiteMultiPage, fetchYouTubeData, formatScrapedData } from '@/lib/dna/scraper'
+import { scrapeWebsiteMultiPage, fetchYouTubeData, formatScrapedData, type TranscriptForDNA } from '@/lib/dna/scraper'
 import { buildDNAPrompt } from '@/lib/dna/prompt'
-import type { GenerateDNARequest, DNASources } from '@/lib/dna/types'
+import { syncFathomMeetings, isFathomConfigured } from '@/lib/dna/fathom'
+import type { GenerateDNARequest, DNASources, TranscriptSourceMeta } from '@/lib/dna/types'
 
 export const maxDuration = 180
 
@@ -14,7 +15,7 @@ export const maxDuration = 180
  */
 export async function POST(req: NextRequest) {
   const body: GenerateDNARequest = await req.json()
-  const { client_id, client_name, website_url, youtube_url, context, transcript } = body
+  const { client_id, client_name, website_url, youtube_url, context, transcript, include_fathom, include_transcripts } = body
 
   // Validation
   if (!client_id || !client_name) {
@@ -90,7 +91,111 @@ export async function POST(req: NextRequest) {
           })
         }
 
-        const scrapedData = formatScrapedData(websiteData, youtubeData, context, transcript)
+        // Stage 1.5: Sync & select transcripts from Fathom + YouTube
+        let selectedTranscripts: TranscriptForDNA[] = []
+        let fathomSyncResult: { found: number; new_synced: number; already_stored: number } | null = null
+
+        const supabase = createClient(
+          process.env.NEXT_PUBLIC_SUPABASE_URL!,
+          process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        )
+
+        // Fathom sync (if configured and not explicitly disabled)
+        if (isFathomConfigured() && include_fathom !== false) {
+          sendEvent('progress', { stage: 'syncing_fathom', message: 'Syncing Fathom meeting transcripts...' })
+          try {
+            // Extract domain from website URL for matching
+            const domain = website_url ? new URL(website_url).hostname.replace(/^www\./, '') : null
+            const result = await syncFathomMeetings(client_id, client_name, domain, supabase)
+            fathomSyncResult = { found: result.found, new_synced: result.new_synced, already_stored: result.already_stored }
+            sendEvent('progress', {
+              stage: 'fathom_done',
+              message: result.found > 0
+                ? `Found ${result.found} Fathom meeting${result.found > 1 ? 's' : ''} (${result.new_synced} new)`
+                : 'No Fathom meetings found for this client',
+              found: result.found,
+              new_synced: result.new_synced,
+            })
+          } catch (err) {
+            console.error('Fathom sync failed:', err)
+            sendEvent('progress', {
+              stage: 'fathom_done',
+              message: `Fathom sync skipped: ${err instanceof Error ? err.message : 'unknown error'}`,
+              found: 0,
+            })
+          }
+        }
+
+        // Select transcripts from database (both Fathom and YouTube)
+        if (include_transcripts !== false) {
+          sendEvent('progress', { stage: 'selecting_transcripts', message: 'Selecting best transcripts...' })
+
+          const { data: allTranscripts } = await supabase
+            .from('client_transcripts')
+            .select('source, source_id, title, transcript_text, summary, word_count, relevance_tag, recorded_at, metadata')
+            .eq('client_id', client_id)
+            .order('recorded_at', { ascending: false })
+
+          if (allTranscripts && allTranscripts.length > 0) {
+            // Smart selection with 20,000 word budget
+            const WORD_BUDGET = 20000
+            let wordsUsed = 0
+
+            // Priority 1: Onboarding transcripts (most valuable for DNA)
+            const onboarding = allTranscripts.filter(t => t.relevance_tag === 'onboarding')
+            // Priority 2: Strategy transcripts
+            const strategy = allTranscripts.filter(t => t.relevance_tag === 'strategy')
+            // Priority 3: YouTube transcripts sorted by view count
+            const ytTranscripts = allTranscripts
+              .filter(t => t.source === 'youtube')
+              .sort((a, b) => (Number(b.metadata?.view_count) || 0) - (Number(a.metadata?.view_count) || 0))
+              .slice(0, 5)
+            // Priority 4: Other meetings (most recent)
+            const general = allTranscripts.filter(t =>
+              t.relevance_tag === 'general' || t.relevance_tag === 'content_review'
+            )
+
+            const prioritized = [
+              ...onboarding,
+              ...strategy,
+              ...ytTranscripts.filter(yt => !onboarding.includes(yt) && !strategy.includes(yt)),
+              ...general,
+            ]
+
+            // Deduplicate by source_id
+            const seen = new Set<string>()
+            for (const t of prioritized) {
+              const key = `${t.source}:${t.source_id}`
+              if (seen.has(key)) continue
+              if (wordsUsed + (t.word_count || 0) > WORD_BUDGET) continue
+              seen.add(key)
+
+              selectedTranscripts.push({
+                source: t.source as 'fathom' | 'youtube',
+                title: t.title || 'Untitled',
+                text: t.transcript_text,
+                summary: t.summary,
+                word_count: t.word_count || 0,
+                relevance_tag: t.relevance_tag || 'general',
+                recorded_at: t.recorded_at,
+                metadata: t.metadata as Record<string, unknown> || {},
+              })
+              wordsUsed += t.word_count || 0
+            }
+
+            const fathomSelected = selectedTranscripts.filter(t => t.source === 'fathom').length
+            const ytSelected = selectedTranscripts.filter(t => t.source === 'youtube').length
+            sendEvent('progress', {
+              stage: 'transcripts_selected',
+              message: `Selected ${selectedTranscripts.length} transcript${selectedTranscripts.length !== 1 ? 's' : ''} (${wordsUsed.toLocaleString()} words): ${fathomSelected} meetings, ${ytSelected} videos`,
+              fathom_count: fathomSelected,
+              youtube_count: ytSelected,
+              total_words: wordsUsed,
+            })
+          }
+        }
+
+        const scrapedData = formatScrapedData(websiteData, youtubeData, context, transcript, selectedTranscripts.length > 0 ? selectedTranscripts : undefined)
 
         if (!scrapedData.trim()) {
           sendEvent('error', { message: 'Could not scrape any data from provided sources' })
@@ -140,6 +245,14 @@ export async function POST(req: NextRequest) {
 
         const transcriptWordCount = transcript ? transcript.split(/\s+/).length : 0
 
+        // Build transcript source metadata
+        const transcriptSourcesMeta: TranscriptSourceMeta[] = selectedTranscripts.map(t => ({
+          source: t.source,
+          title: t.title,
+          word_count: t.word_count,
+          relevance: t.relevance_tag,
+        }))
+
         const sources: DNASources = {
           website_data: websiteData ? `Scraped ${websiteData.pages.length} pages from ${website_url}` : null,
           website_pages_scraped: websiteData?.pages.map(p => `${p.pageType}: ${p.url}`) || undefined,
@@ -157,12 +270,14 @@ export async function POST(req: NextRequest) {
           context_provided: !!context,
           total_source_words: totalSourceWords,
           model_used: model,
+          // Fathom + YT transcript metadata
+          fathom_meetings_found: fathomSyncResult?.found || undefined,
+          fathom_meetings_included: selectedTranscripts.filter(t => t.source === 'fathom').length || undefined,
+          fathom_meeting_titles: selectedTranscripts.filter(t => t.source === 'fathom').map(t => t.title) || undefined,
+          youtube_transcripts_included: selectedTranscripts.filter(t => t.source === 'youtube').length || undefined,
+          youtube_transcript_titles: selectedTranscripts.filter(t => t.source === 'youtube').map(t => t.title) || undefined,
+          transcript_sources: transcriptSourcesMeta.length > 0 ? transcriptSourcesMeta : undefined,
         }
-
-        const supabase = createClient(
-          process.env.NEXT_PUBLIC_SUPABASE_URL!,
-          process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
-        )
 
         const { data: existing } = await supabase
           .from('client_dna')
@@ -202,6 +317,9 @@ export async function POST(req: NextRequest) {
           .update({ dna_doc_url: dnaViewerUrl })
           .eq('client_id', client_id)
 
+        const fathomIncluded = selectedTranscripts.filter(t => t.source === 'fathom').length
+        const ytTranscriptsIncluded = selectedTranscripts.filter(t => t.source === 'youtube').length
+
         sendEvent('complete', {
           dna_id: inserted.id,
           version: nextVersion,
@@ -209,6 +327,8 @@ export async function POST(req: NextRequest) {
           sources: {
             website: websiteData ? `${websiteData.pages.length} pages (${websiteData.totalChars.toLocaleString()} chars)` : 'skipped',
             youtube: youtubeData ? `${youtubeData.type} — ${youtubeData.raw?.videos.length || 0} videos, ${youtubeData.raw?.playlists?.length || 0} playlists` : 'skipped',
+            fathom: fathomIncluded > 0 ? `${fathomIncluded} meeting${fathomIncluded > 1 ? 's' : ''}` : 'none',
+            youtube_transcripts: ytTranscriptsIncluded > 0 ? `${ytTranscriptsIncluded} video${ytTranscriptsIncluded > 1 ? 's' : ''}` : 'none',
             context: context ? 'provided' : 'none',
             transcript: transcript ? `provided (${transcriptWordCount.toLocaleString()} words)` : 'none',
             total_source_words: totalSourceWords,

@@ -14,6 +14,8 @@ import {
   AlertCircle,
   Loader2,
   ChevronRight,
+  Phone,
+  Video,
 } from 'lucide-react'
 import Nav from '@/components/nav'
 import { createClient } from '@/lib/supabase/client'
@@ -31,6 +33,13 @@ interface CompletionData {
   dna_id: string
   version: number
   sources: Record<string, string>
+}
+
+interface TranscriptSummary {
+  fathom: { title: string; recorded_at: string; word_count: number; relevance_tag: string }[]
+  youtube: { title: string; word_count: number; video_id: string }[]
+  totals: { fathom: number; youtube: number; total_words: number }
+  fathom_configured: boolean
 }
 
 interface FormData {
@@ -168,6 +177,11 @@ export default function DNAGeneratePage() {
   // Completion state
   const [completionData, setCompletionData] = useState<CompletionData | null>(null)
 
+  // Transcript state
+  const [transcriptSummary, setTranscriptSummary] = useState<TranscriptSummary | null>(null)
+  const [includeFathom, setIncludeFathom] = useState(true)
+  const [showManualTranscript, setShowManualTranscript] = useState(false)
+
   // Load client info and pre-fill from last DNA
   const loadClient = useCallback(async () => {
     setLoading(true)
@@ -194,6 +208,21 @@ export default function DNAGeneratePage() {
         youtubeUrl: lastDna.youtube_url || '',
         context: lastDna.context || '',
       }))
+    }
+
+    // Load available transcripts
+    try {
+      const res = await fetch(`/api/transcripts/${clientId}`)
+      if (res.ok) {
+        const data: TranscriptSummary = await res.json()
+        setTranscriptSummary(data)
+        // Show manual transcript input if no auto-transcripts available
+        if (data.totals.fathom === 0 && data.totals.youtube === 0 && !data.fathom_configured) {
+          setShowManualTranscript(true)
+        }
+      }
+    } catch {
+      // Transcript summary not critical — continue
     }
 
     setLoading(false)
@@ -258,6 +287,20 @@ export default function DNAGeneratePage() {
         detail: youtubeUrl,
       })
     }
+    if (includeFathom && transcriptSummary?.fathom_configured) {
+      steps.push({
+        id: 'fathom',
+        label: 'Syncing Fathom meetings...',
+        status: 'pending',
+        detail: 'Pulling meeting transcripts',
+      })
+    }
+    steps.push({
+      id: 'transcripts',
+      label: 'Selecting best transcripts...',
+      status: 'pending',
+      detail: '',
+    })
     steps.push({
       id: 'generate',
       label: 'Generating DNA with Claude...',
@@ -281,6 +324,8 @@ export default function DNAGeneratePage() {
           youtube_url: youtubeUrl || undefined,
           context: context || undefined,
           transcript: transcript || undefined,
+          include_fathom: includeFathom,
+          include_transcripts: true,
         }),
         signal: controller.signal,
       })
@@ -355,6 +400,20 @@ export default function DNAGeneratePage() {
         updateStep('youtube', {
           status: label.toLowerCase().includes('could not') ? 'skipped' : 'done',
           label,
+        })
+      } else if (eventStage === 'syncing_fathom') {
+        updateStep('fathom', { status: 'active', label: 'Syncing Fathom meetings...' })
+      } else if (eventStage === 'fathom_done') {
+        updateStep('fathom', {
+          status: 'done',
+          label: message,
+        })
+      } else if (eventStage === 'selecting_transcripts') {
+        updateStep('transcripts', { status: 'active', label: 'Selecting best transcripts...' })
+      } else if (eventStage === 'transcripts_selected') {
+        updateStep('transcripts', {
+          status: 'done',
+          label: message,
         })
       } else if (eventStage === 'generating') {
         updateStep('generate', { status: 'active', label: 'Generating DNA with Claude...' })
@@ -481,25 +540,108 @@ export default function DNAGeneratePage() {
                 />
               </div>
 
-              {/* Onboarding Transcript */}
-              <div>
+              {/* Transcripts Section */}
+              <div className="space-y-3">
                 <label className="label flex items-center gap-1.5">
                   <MessageSquare size={12} style={{ color: 'var(--purple)' }} />
-                  Onboarding Transcript
-                  <span
-                    className="text-[10px] font-normal ml-1"
+                  Meeting & Video Transcripts
+                </label>
+
+                {/* Fathom Toggle */}
+                {transcriptSummary?.fathom_configured && (
+                  <div
+                    className="p-3 rounded-lg flex items-center justify-between"
+                    style={{ background: 'var(--surface-2)' }}
+                  >
+                    <div className="flex items-center gap-2">
+                      <Phone size={14} style={{ color: 'var(--purple)' }} />
+                      <div>
+                        <p className="text-xs font-medium" style={{ color: 'var(--text)' }}>
+                          Auto-pull from Fathom
+                        </p>
+                        <p className="text-[10px]" style={{ color: 'var(--text-3)' }}>
+                          {transcriptSummary.totals.fathom > 0
+                            ? `${transcriptSummary.totals.fathom} meeting${transcriptSummary.totals.fathom > 1 ? 's' : ''} found`
+                            : 'Will search for meetings during generation'}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIncludeFathom(!includeFathom)}
+                      className="relative w-10 h-5 rounded-full transition-colors"
+                      style={{ background: includeFathom ? 'var(--gold)' : 'var(--border)' }}
+                    >
+                      <div
+                        className="absolute top-0.5 w-4 h-4 rounded-full transition-transform"
+                        style={{
+                          background: '#fff',
+                          transform: includeFathom ? 'translateX(22px)' : 'translateX(2px)',
+                        }}
+                      />
+                    </button>
+                  </div>
+                )}
+
+                {/* Available Transcripts Preview */}
+                {transcriptSummary && (transcriptSummary.totals.fathom > 0 || transcriptSummary.totals.youtube > 0) && (
+                  <div
+                    className="p-3 rounded-lg space-y-2"
+                    style={{ background: 'rgba(34, 197, 94, 0.06)', border: '1px solid rgba(34, 197, 94, 0.15)' }}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <Check size={12} style={{ color: 'var(--green)' }} />
+                      <span className="text-[10px] font-medium" style={{ color: 'var(--green)' }}>
+                        {transcriptSummary.totals.total_words.toLocaleString()} words of transcript data available
+                      </span>
+                    </div>
+                    {transcriptSummary.fathom.length > 0 && (
+                      <div className="space-y-1">
+                        {transcriptSummary.fathom.slice(0, 3).map((m, i) => (
+                          <div key={i} className="flex items-center gap-1.5 text-[10px]" style={{ color: 'var(--text-3)' }}>
+                            <Phone size={9} />
+                            <span className="truncate">{m.title}</span>
+                            <span className="badge badge-neutral text-[9px] shrink-0">{m.relevance_tag.replace('_', ' ')}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {transcriptSummary.youtube.length > 0 && (
+                      <div className="space-y-1">
+                        {transcriptSummary.youtube.slice(0, 3).map((v, i) => (
+                          <div key={i} className="flex items-center gap-1.5 text-[10px]" style={{ color: 'var(--text-3)' }}>
+                            <Video size={9} />
+                            <span className="truncate">{v.title}</span>
+                            <span className="shrink-0">{v.word_count?.toLocaleString()} words</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {/* Manual Transcript (collapsed by default if auto available) */}
+                {!showManualTranscript && (transcriptSummary?.fathom_configured || (transcriptSummary && transcriptSummary.totals.total_words > 0)) ? (
+                  <button
+                    type="button"
+                    onClick={() => setShowManualTranscript(true)}
+                    className="text-[10px] flex items-center gap-1"
                     style={{ color: 'var(--text-3)' }}
                   >
-                    (optional but powerful)
-                  </span>
-                </label>
-                <textarea
-                  className="input text-xs"
-                  rows={4}
-                  placeholder="Paste onboarding call transcript here — this gives Claude deep context about the client's voice, preferences, and goals..."
-                  value={formData.transcript}
-                  onChange={(e) => updateFormField('transcript', e.target.value)}
-                />
+                    <FileText size={10} />
+                    Paste additional transcript manually
+                  </button>
+                ) : null}
+
+                {(showManualTranscript || (!transcriptSummary?.fathom_configured && transcriptSummary?.totals.total_words === 0)) && (
+                  <textarea
+                    className="input text-xs"
+                    rows={4}
+                    placeholder="Paste onboarding call transcript here — this gives Claude deep context about the client's voice, preferences, and goals..."
+                    value={formData.transcript}
+                    onChange={(e) => updateFormField('transcript', e.target.value)}
+                  />
+                )}
               </div>
 
               {/* Error */}
@@ -807,6 +949,38 @@ export default function DNAGeneratePage() {
                       </div>
                       <p className="text-xs font-medium" style={{ color: 'var(--text)' }}>
                         {completionData.sources.youtube}
+                      </p>
+                    </div>
+                  )}
+                  {completionData.sources.fathom && completionData.sources.fathom !== 'none' && (
+                    <div
+                      className="p-3 rounded-lg"
+                      style={{ background: 'var(--surface-2)' }}
+                    >
+                      <div className="flex items-center gap-1.5 mb-1">
+                        <Phone size={11} style={{ color: 'var(--purple)' }} />
+                        <span className="text-[10px] font-medium" style={{ color: 'var(--text-3)' }}>
+                          Fathom Meetings
+                        </span>
+                      </div>
+                      <p className="text-xs font-medium" style={{ color: 'var(--text)' }}>
+                        {completionData.sources.fathom}
+                      </p>
+                    </div>
+                  )}
+                  {completionData.sources.youtube_transcripts && completionData.sources.youtube_transcripts !== 'none' && (
+                    <div
+                      className="p-3 rounded-lg"
+                      style={{ background: 'var(--surface-2)' }}
+                    >
+                      <div className="flex items-center gap-1.5 mb-1">
+                        <Video size={11} style={{ color: 'var(--green)' }} />
+                        <span className="text-[10px] font-medium" style={{ color: 'var(--text-3)' }}>
+                          Video Transcripts
+                        </span>
+                      </div>
+                      <p className="text-xs font-medium" style={{ color: 'var(--text)' }}>
+                        {completionData.sources.youtube_transcripts}
                       </p>
                     </div>
                   )}

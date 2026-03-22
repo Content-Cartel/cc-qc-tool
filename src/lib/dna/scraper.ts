@@ -612,11 +612,23 @@ ${fallback.recentVideoTitles.map(t => `- ${t}`).join('\n')}
  * Format all scraped data into structured sections for the DNA prompt.
  * Enhanced with data quality indicators.
  */
+export interface TranscriptForDNA {
+  source: 'fathom' | 'youtube'
+  title: string
+  text: string
+  summary?: string | null
+  word_count: number
+  relevance_tag: string
+  recorded_at?: string | null
+  metadata?: Record<string, unknown>
+}
+
 export function formatScrapedData(
   website: ScrapedWebsite | null,
   youtube: YouTubeResult | null,
   context?: string,
   transcript?: string,
+  transcripts?: TranscriptForDNA[],
 ): string {
   const sections: string[] = []
 
@@ -688,28 +700,68 @@ ${youtube.formatted}`)
 ${context}`)
   }
 
+  // Auto-pulled transcripts (Fathom meetings + YouTube videos)
+  if (transcripts && transcripts.length > 0) {
+    const fathomTranscripts = transcripts.filter(t => t.source === 'fathom')
+    const ytTranscripts = transcripts.filter(t => t.source === 'youtube')
+    const totalTranscriptWords = transcripts.reduce((sum, t) => sum + t.word_count, 0)
+
+    const transcriptParts: string[] = []
+    transcriptParts.push(`## MEETING & VIDEO TRANSCRIPTS
+**Sources:** ${fathomTranscripts.length ? `${fathomTranscripts.length} Fathom meeting${fathomTranscripts.length > 1 ? 's' : ''}` : ''}${fathomTranscripts.length && ytTranscripts.length ? ', ' : ''}${ytTranscripts.length ? `${ytTranscripts.length} YouTube video${ytTranscripts.length > 1 ? 's' : ''}` : ''} (${totalTranscriptWords.toLocaleString()} total words)
+**Note:** These are REAL transcripts from actual meetings and videos — weight them heavily for Voice Fingerprint and strategy insights.`)
+
+    for (const t of transcripts) {
+      const label = t.source === 'fathom'
+        ? `[FATHOM — ${t.relevance_tag.replace('_', ' ')}] ${t.title || 'Untitled Meeting'}`
+        : `[YOUTUBE${t.metadata?.view_count ? ` — ${Number(t.metadata.view_count).toLocaleString()} views` : ''}] ${t.title || 'Untitled Video'}`
+
+      const date = t.recorded_at ? new Date(t.recorded_at).toLocaleDateString() : ''
+
+      let entry = `### ${label}${date ? ` (${date})` : ''}\n`
+      if (t.summary) {
+        entry += `**AI Summary:** ${t.summary.slice(0, 1000)}\n\n`
+      }
+      // Cap individual transcripts at 5000 chars to stay within budget
+      entry += `**Transcript (${t.word_count.toLocaleString()} words):**\n${t.text.slice(0, 5000)}`
+      if (t.text.length > 5000) entry += '\n[...truncated for length]'
+
+      transcriptParts.push(entry)
+    }
+
+    sections.push(transcriptParts.join('\n\n'))
+  }
+
+  // Manual transcript (backward compat — used when no auto-transcripts available)
   if (transcript) {
     const wordCount = transcript.split(/\s+/).length
-    sections.push(`## ONBOARDING/STORY TRANSCRIPT
+    sections.push(`## MANUAL TRANSCRIPT (provided by team)
 **Word Count:** ${wordCount.toLocaleString()} words
 ${transcript.slice(0, 15000)}`)
   }
 
   // Add data quality summary
+  const fathomCount = transcripts?.filter(t => t.source === 'fathom').length || 0
+  const ytTranscriptCount = transcripts?.filter(t => t.source === 'youtube').length || 0
+  const totalTranscriptWords = transcripts?.reduce((sum, t) => sum + t.word_count, 0) || 0
+
   const totalWords = sections.join(' ').split(/\s+/).length
   sections.unshift(`## DATA QUALITY SUMMARY
 **Total Source Data:** ~${totalWords.toLocaleString()} words
 **Sources Available:** ${[
     website ? `Website (${website.pages.length} pages)` : null,
     youtube ? `YouTube (${youtube.type === 'api' ? 'full API data' : 'limited fallback'})` : null,
+    fathomCount > 0 ? `Fathom Meetings (${fathomCount} calls, ${totalTranscriptWords.toLocaleString()} words)` : null,
+    ytTranscriptCount > 0 ? `YouTube Transcripts (${ytTranscriptCount} videos)` : null,
     context ? 'Team Context' : null,
-    transcript ? 'Onboarding Transcript' : null,
+    transcript ? 'Manual Transcript' : null,
   ].filter(Boolean).join(', ')}
 **Sources Missing:** ${[
     !website ? 'Website' : null,
     !youtube ? 'YouTube' : null,
+    fathomCount === 0 && !transcript ? 'Meeting Transcripts (Fathom or manual)' : null,
+    ytTranscriptCount === 0 ? 'Video Transcripts' : null,
     !context ? 'Team Context' : null,
-    !transcript ? 'Onboarding Transcript' : null,
   ].filter(Boolean).join(', ') || 'None'}`)
 
   return sections.join('\n\n---\n\n')

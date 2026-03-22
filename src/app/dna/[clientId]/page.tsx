@@ -667,8 +667,18 @@ export default function DNAViewerPage() {
                   {selectedVersion.youtube_url && (
                     <span className="badge badge-red text-[10px]">YouTube: {selectedVersion.youtube_url}</span>
                   )}
+                  {(selectedVersion.sources as unknown as Record<string, unknown>)?.fathom_meetings_included ? (
+                    <span className="badge badge-purple text-[10px]" title={((selectedVersion.sources as unknown as Record<string, unknown>)?.fathom_meeting_titles as string[] || []).join(', ')}>
+                      Fathom: {String((selectedVersion.sources as unknown as Record<string, unknown>)?.fathom_meetings_included)} meeting{Number((selectedVersion.sources as unknown as Record<string, unknown>)?.fathom_meetings_included) > 1 ? 's' : ''}
+                    </span>
+                  ) : null}
+                  {(selectedVersion.sources as unknown as Record<string, unknown>)?.youtube_transcripts_included ? (
+                    <span className="badge badge-green text-[10px]" title={((selectedVersion.sources as unknown as Record<string, unknown>)?.youtube_transcript_titles as string[] || []).join(', ')}>
+                      YT Transcripts: {String((selectedVersion.sources as unknown as Record<string, unknown>)?.youtube_transcripts_included)} video{Number((selectedVersion.sources as unknown as Record<string, unknown>)?.youtube_transcripts_included) > 1 ? 's' : ''}
+                    </span>
+                  ) : null}
                   {(selectedVersion.sources as unknown as Record<string, string | null>)?.transcript_excerpt && (
-                    <span className="badge badge-purple text-[10px]">Transcript provided</span>
+                    <span className="badge badge-purple text-[10px]">Manual transcript</span>
                   )}
                   {selectedVersion.context && (
                     <span className="badge badge-amber text-[10px]">Context provided</span>

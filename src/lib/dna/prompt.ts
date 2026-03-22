@@ -40,6 +40,8 @@ ${scrapedData}
 
 7. **Use EXACT section headers and numbering below.**
 
+8. **TRANSCRIPT DATA IS GOLD.** Meeting transcripts (especially onboarding calls) contain the client's actual voice, strategic thinking, and real preferences that no website or YouTube metadata can capture. Weight these heavily for Voice Fingerprint (Section 2), The Play (Section 1), and Off-Limits (Section 7). Direct quotes from transcripts should populate the "DO sound like" examples. If onboarding transcripts are available, they should be the PRIMARY source for voice analysis.
+
 ---
 
 ## OUTPUT FORMAT — Follow this EXACT structure:

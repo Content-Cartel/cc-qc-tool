@@ -123,6 +123,37 @@ export interface DNASources {
   context_provided: boolean
   total_source_words?: number
   model_used?: string
+  // Fathom + YT transcript sources
+  fathom_meetings_found?: number
+  fathom_meetings_included?: number
+  fathom_meeting_titles?: string[]
+  youtube_transcripts_included?: number
+  youtube_transcript_titles?: string[]
+  transcript_sources?: TranscriptSourceMeta[]
+}
+
+export interface TranscriptSourceMeta {
+  source: 'fathom' | 'youtube'
+  title: string
+  word_count: number
+  relevance: string
+}
+
+export interface ClientTranscript {
+  id: string
+  client_id: number
+  source: 'fathom' | 'youtube'
+  source_id: string
+  title: string | null
+  transcript_text: string
+  summary: string | null
+  speaker_names: string[] | null
+  word_count: number | null
+  duration_seconds: number | null
+  recorded_at: string | null
+  metadata: Record<string, unknown>
+  relevance_tag: 'onboarding' | 'strategy' | 'content_review' | 'general'
+  created_at: string
 }
 
 export interface GenerateDNARequest {
@@ -132,4 +163,6 @@ export interface GenerateDNARequest {
   youtube_url?: string
   context?: string
   transcript?: string
+  include_fathom?: boolean
+  include_transcripts?: boolean
 }
