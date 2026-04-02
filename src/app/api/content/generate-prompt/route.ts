@@ -51,13 +51,6 @@ export async function POST(req: NextRequest) {
 
   const clientName = client.name
 
-  // Check client_settings for website URL (used for Fathom domain matching)
-  const { data: settings } = await supabase
-    .from('client_settings')
-    .select('dna_doc_url')
-    .eq('client_id', client_id)
-    .maybeSingle()
-
   // Step 1: Sync Fathom meetings BEFORE selecting transcripts
   // This ensures any new meetings are available for selection
   // Uses title-based matching since we don't store website URLs
