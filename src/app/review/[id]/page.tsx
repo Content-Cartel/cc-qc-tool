@@ -97,8 +97,6 @@ export default function ReviewPage() {
   const [transcriptError, setTranscriptError] = useState<string | null>(null)
   const [showManualTranscript, setShowManualTranscript] = useState(false)
   const [manualTranscript, setManualTranscript] = useState('')
-  const [youtubeUrlInput, setYoutubeUrlInput] = useState('')
-  const [showYoutubeInput, setShowYoutubeInput] = useState(false)
   const [copied, setCopied] = useState(false)
   const [versionHistory, setVersionHistory] = useState<{id: string, title: string, created_at: string, external_url: string | null}[]>([])
   const [showPreviousVersion, setShowPreviousVersion] = useState(false)
