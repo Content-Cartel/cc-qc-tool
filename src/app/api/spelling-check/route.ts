@@ -1,18 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { google } from 'googleapis'
 import Anthropic from '@anthropic-ai/sdk'
-import { extractGoogleDriveFileId } from '@/lib/utils/google-drive'
-import { extractTextFromFrame, checkSpelling, type FrameText } from '@/lib/spelling/analyzer'
-import { exec } from 'child_process'
-import { promisify } from 'util'
-import * as fs from 'fs'
-import * as path from 'path'
-import * as os from 'os'
 
-const execAsync = promisify(exec)
-
-export const maxDuration = 300 // 5 min for video processing
+export const maxDuration = 60
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -20,116 +10,18 @@ const supabase = createClient(
 )
 
 /**
- * Get the ffmpeg binary path - uses @ffmpeg-installer/ffmpeg package
- * which bundles a platform-appropriate static binary (works on Vercel).
- */
-function getFfmpegPath(): string {
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg')
-    return ffmpegInstaller.path
-  } catch {
-    // Fallback to system ffmpeg
-    return 'ffmpeg'
-  }
-}
-
-function getFfprobePath(): string {
-  try {
-    // ffprobe is bundled alongside ffmpeg in the installer package
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const ffmpegInstaller = require('@ffmpeg-installer/ffmpeg')
-    // Replace ffmpeg binary name with ffprobe in the path
-    const ffmpegPath: string = ffmpegInstaller.path
-    return ffmpegPath.replace(/ffmpeg$/, 'ffprobe')
-  } catch {
-    return 'ffprobe'
-  }
-}
-
-function getDriveAuth() {
-  const keyJson = process.env.GOOGLE_SERVICE_ACCOUNT_KEY
-  if (!keyJson) return null
-  try {
-    const credentials = JSON.parse(keyJson)
-    return new google.auth.GoogleAuth({
-      credentials,
-      scopes: ['https://www.googleapis.com/auth/drive.readonly'],
-    })
-  } catch {
-    return null
-  }
-}
-
-async function downloadVideoFromDrive(fileId: string, destPath: string): Promise<void> {
-  const auth = getDriveAuth()
-  if (!auth) throw new Error('Google service account not configured')
-
-  const drive = google.drive({ version: 'v3', auth })
-
-  const res = await drive.files.get(
-    { fileId, alt: 'media', supportsAllDrives: true },
-    { responseType: 'stream' }
-  )
-
-  return new Promise((resolve, reject) => {
-    const dest = fs.createWriteStream(destPath)
-    ;(res.data as NodeJS.ReadableStream)
-      .pipe(dest)
-      .on('finish', resolve)
-      .on('error', reject)
-  })
-}
-
-/**
- * Extract frames from a video at regular intervals using ffmpeg.
- * Uses @ffmpeg-installer/ffmpeg for Vercel compatibility.
- */
-async function extractFrames(
-  videoPath: string,
-  outputDir: string,
-  intervalSeconds: number = 5,
-  maxFrames: number = 60
-): Promise<{ path: string; timestamp: number }[]> {
-  const ffmpeg = getFfmpegPath()
-  const ffprobe = getFfprobePath()
-
-  // Get video duration
-  const { stdout: durationOut } = await execAsync(
-    `"${ffprobe}" -v quiet -show_entries format=duration -of csv=p=0 "${videoPath}"`
-  )
-  const duration = parseFloat(durationOut.trim()) || 0
-
-  if (duration <= 0) throw new Error('Could not determine video duration')
-
-  // Calculate actual interval to not exceed maxFrames
-  const actualInterval = Math.max(intervalSeconds, duration / maxFrames)
-
-  // Extract frames
-  await execAsync(
-    `"${ffmpeg}" -i "${videoPath}" -vf "fps=1/${actualInterval},scale=1280:-1" -q:v 3 -f image2 "${outputDir}/frame_%04d.jpg" 2>/dev/null`
-  )
-
-  // Collect frame paths with timestamps
-  const files = fs.readdirSync(outputDir)
-    .filter(f => f.startsWith('frame_') && f.endsWith('.jpg'))
-    .sort()
-
-  return files.map((file, idx) => ({
-    path: path.join(outputDir, file),
-    timestamp: idx * actualInterval,
-  }))
-}
-
-/**
  * POST /api/spelling-check
  *
- * Runs on-screen text extraction and spelling check on a QC submission video.
+ * Analyzes a submission's transcript against the client's DNA to flag
+ * potential on-screen spelling issues (names, company names, titles, etc.)
+ *
+ * Works by cross-referencing the transcript with known correct spellings
+ * from the client DNA, then flagging words/phrases that could be misspelled
+ * when displayed as lower thirds, titles, or captions.
+ *
  * Body: { submission_id: string }
  */
 export async function POST(req: NextRequest) {
-  let tmpDir: string | null = null
-
   try {
     const { submission_id } = await req.json()
 
@@ -142,10 +34,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Anthropic API key not configured' }, { status: 500 })
     }
 
-    // Get submission + client info
+    // Get submission + transcript + client info
     const { data: submission, error: fetchErr } = await supabase
       .from('qc_submissions')
-      .select('id, external_url, title, client_id, clients(name)')
+      .select('id, external_url, title, client_id, transcript, clients(name)')
       .eq('id', submission_id)
       .single()
 
@@ -153,8 +45,28 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Submission not found' }, { status: 404 })
     }
 
-    if (!submission.external_url) {
-      return NextResponse.json({ error: 'No video URL on this submission' }, { status: 400 })
+    // Need either a transcript or client transcripts to analyze
+    let transcriptText = submission.transcript
+
+    // If no submission transcript, try to find client transcripts for this video
+    if (!transcriptText) {
+      const { data: clientTranscripts } = await supabase
+        .from('client_transcripts')
+        .select('transcript_text')
+        .eq('client_id', submission.client_id)
+        .order('recorded_at', { ascending: false })
+        .limit(1)
+
+      if (clientTranscripts?.[0]?.transcript_text) {
+        transcriptText = clientTranscripts[0].transcript_text
+      }
+    }
+
+    if (!transcriptText) {
+      return NextResponse.json(
+        { error: 'No transcript available for this submission. Transcribe the video first, then run the spelling check.' },
+        { status: 400 }
+      )
     }
 
     const clients = submission.clients as unknown as { name: string }[] | { name: string } | null
@@ -169,97 +81,128 @@ export async function POST(req: NextRequest) {
       .limit(1)
       .single()
 
-    // Extract relevant DNA sections for spelling context (names, company, people)
     let dnaExcerpt = ''
     if (dna?.dna_markdown) {
-      dnaExcerpt = dna.dna_markdown.slice(0, 2000)
+      // Pull first 3000 chars of DNA (covers names, company, key people, brand terms)
+      dnaExcerpt = dna.dna_markdown.slice(0, 3000)
     }
 
-    // Extract Drive file ID
-    const fileId = extractGoogleDriveFileId(submission.external_url)
-    if (!fileId) {
-      return NextResponse.json({ error: 'Could not extract Drive file ID' }, { status: 400 })
-    }
-
-    // Create temp directory for processing
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-spelling-'))
-    const videoPath = path.join(tmpDir, 'video.mp4')
-    const framesDir = path.join(tmpDir, 'frames')
-    fs.mkdirSync(framesDir)
-
-    // Download video
-    await downloadVideoFromDrive(fileId, videoPath)
-
-    // Extract frames (every 5 seconds, max 60 frames)
-    const frames = await extractFrames(videoPath, framesDir, 5, 60)
-
-    if (frames.length === 0) {
-      return NextResponse.json({ error: 'Could not extract frames from video' }, { status: 500 })
-    }
-
-    // Process frames through Claude Vision to extract on-screen text
+    // Use Claude to analyze transcript for potential on-screen spelling issues
     const anthropic = new Anthropic({ apiKey: anthropicKey })
-    const frameTexts: FrameText[] = []
 
-    // Process frames in batches of 5 to avoid rate limits
-    for (let i = 0; i < frames.length; i += 5) {
-      const batch = frames.slice(i, i + 5)
-      const results = await Promise.all(
-        batch.map(async (frame) => {
-          const imageData = fs.readFileSync(frame.path)
-          const base64 = imageData.toString('base64')
-          const texts = await extractTextFromFrame(anthropic, base64)
-          return { timestamp_seconds: frame.timestamp, texts }
-        })
-      )
-      frameTexts.push(...results.filter(r => r.texts.length > 0))
+    const response = await anthropic.messages.create({
+      model: 'claude-sonnet-4-20250514',
+      max_tokens: 2048,
+      messages: [
+        {
+          role: 'user',
+          content: `You are a QC spelling checker for video production at Content Cartel. Your job is to identify words and phrases in a video transcript that are likely to appear as ON-SCREEN TEXT (lower thirds, name plates, titles, captions, URLs) and might be misspelled by editors.
+
+CLIENT INFORMATION (correct spellings):
+Client name: ${clientName}
+${dnaExcerpt}
+
+VIDEO TITLE: ${submission.title || 'Untitled'}
+
+TRANSCRIPT:
+${transcriptText.slice(0, 8000)}
+
+TASK:
+1. Identify all proper nouns, names, company names, titles, URLs, technical terms, and brand-specific words in the transcript
+2. For each one, flag it as a potential on-screen spelling risk — these are words editors will type into lower thirds, title cards, or captions
+3. Provide the CORRECT spelling based on the client DNA and context
+4. Estimate roughly where in the video this text might appear (early/middle/late, as approximate seconds)
+
+Focus on:
+- Person names mentioned (speakers, guests, the client themselves)
+- Company/brand names
+- Product or service names
+- Technical terms specific to the client's industry
+- URLs or social handles mentioned
+- Titles or credentials (CEO, PhD, etc.)
+
+DO NOT flag:
+- Common English words
+- Generic phrases unlikely to appear on screen
+- Words that are obviously correct
+
+Return a JSON array. Each item:
+- "detected_text": the word/phrase as heard in transcript
+- "correct_spelling": the verified correct spelling from DNA/context
+- "issue": why this might be misspelled (e.g., "commonly misspelled name", "unusual company spelling")
+- "timestamp_estimate": approximate seconds into the video (0 for beginning, estimate based on position in transcript)
+- "confidence": 0.0-1.0 (1.0 = very likely to be misspelled by editors, 0.5 = moderate risk)
+- "on_screen_type": what kind of on-screen element this would appear in ("lower_third", "title_card", "caption", "url_overlay")
+
+If no risks found, return empty array: []
+Return ONLY valid JSON, no other text.`,
+        },
+      ],
+    })
+
+    const content = response.content[0]
+    if (content.type !== 'text') {
+      return NextResponse.json({ success: true, issues: [], message: 'No analysis produced' })
     }
 
-    if (frameTexts.length === 0) {
-      return NextResponse.json({
-        success: true,
-        message: 'No on-screen text detected in video frames',
-        issues: [],
-        frames_analyzed: frames.length,
-        frames_with_text: 0,
-      })
+    // Parse response
+    let issues: Array<{
+      detected_text: string
+      correct_spelling: string
+      issue: string
+      timestamp_estimate: number
+      confidence: number
+      on_screen_type: string
+    }> = []
+
+    try {
+      let jsonStr = content.text.trim()
+      const jsonMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/)
+      if (jsonMatch) jsonStr = jsonMatch[1].trim()
+      issues = JSON.parse(jsonStr)
+    } catch {
+      console.error('[spelling-check] Failed to parse response:', content.text.slice(0, 200))
+      return NextResponse.json({ error: 'Failed to parse spelling analysis' }, { status: 500 })
     }
 
-    // Check spelling against client DNA
-    const issues = await checkSpelling(anthropic, frameTexts, dnaExcerpt, clientName)
+    // Filter to only meaningful issues (confidence > 0.3)
+    issues = issues.filter(i => i.confidence > 0.3)
 
     // Save results to database
     if (issues.length > 0) {
       const rows = issues.map(issue => ({
         submission_id,
-        frame_timestamp_seconds: issue.frame_timestamp_seconds,
+        frame_timestamp_seconds: issue.timestamp_estimate || 0,
         detected_text: issue.detected_text,
-        issue_description: issue.issue_description,
-        suggested_fix: issue.suggested_fix,
-        confidence: issue.confidence,
+        issue_description: `${issue.issue} (${issue.on_screen_type})`,
+        suggested_fix: issue.correct_spelling,
+        confidence: Math.max(0, Math.min(1, issue.confidence)),
         status: 'flagged',
       }))
+
+      // Clear previous results for this submission before inserting new ones
+      await supabase
+        .from('spelling_check_results')
+        .delete()
+        .eq('submission_id', submission_id)
 
       await supabase.from('spelling_check_results').insert(rows)
     }
 
     return NextResponse.json({
       success: true,
-      issues,
-      frames_analyzed: frames.length,
-      frames_with_text: frameTexts.length,
-      total_text_elements: frameTexts.reduce((sum, f) => sum + f.texts.length, 0),
+      issues: issues.map(i => ({
+        frame_timestamp_seconds: i.timestamp_estimate || 0,
+        detected_text: i.detected_text,
+        issue_description: `${i.issue} (${i.on_screen_type})`,
+        suggested_fix: i.correct_spelling,
+        confidence: i.confidence,
+      })),
+      total_risks: issues.length,
     })
   } catch (err) {
     console.error('[spelling-check] Error:', err)
     const msg = err instanceof Error ? err.message : 'Unknown error'
     return NextResponse.json({ error: msg }, { status: 500 })
-  } finally {
-    // Cleanup temp files
-    if (tmpDir) {
-      try {
-        fs.rmSync(tmpDir, { recursive: true, force: true })
-      } catch { /* ignore cleanup errors */ }
-    }
   }
 }
