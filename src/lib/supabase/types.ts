@@ -1,9 +1,12 @@
 export type UserRole = 'editor' | 'pm' | 'admin'
 export type ContentType = 'lf_video' | 'sf_video'
 export type SubmissionStatus = 'pending' | 'in_review' | 'approved' | 'revision_requested' | 'resubmitted' | 'follow_up'
-export type NoteCategory = 'brand' | 'technical' | 'creative' | 'copy' | 'audio' | 'other'
-export type PipelineStageKey = 'raw_footage' | 'ai_auto_clean' | 'ai_auto_cut' | 'transcript_instructions' | 'editor_polish' | 'qc_review' | 'package' | 'publish'
+export type NoteCategory = 'brand' | 'technical' | 'creative' | 'copy' | 'audio' | 'other' | 'client_feedback'
+export type PipelineStageKey = 'raw_footage' | 'ai_auto_clean' | 'editor_polish' | 'qc_review' | 'package' | 'publish'
 export type EditingLevel = 'minimal' | 'normal' | 'high'
+
+export type TranscriptStatus = 'pending' | 'processing' | 'completed' | 'failed'
+export type IntakeSource = 'manual' | 'n8n_drive'
 
 export interface QCSubmission {
   id: string
@@ -23,6 +26,9 @@ export interface QCSubmission {
   editing_level: EditingLevel | null
   deadline: string | null
   qc_score: number | null
+  transcript: string | null
+  transcript_status: TranscriptStatus | null
+  intake_source: IntakeSource
   created_at: string
   updated_at: string
   // Joined

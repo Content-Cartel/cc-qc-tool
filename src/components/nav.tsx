@@ -1,6 +1,7 @@
 'use client'
 
 import Link from 'next/link'
+import Image from 'next/image'
 import { usePathname } from 'next/navigation'
 import { useAuth } from '@/hooks/use-auth'
 import { LayoutDashboard, Upload, FileCheck, GitBranch, LogOut, Dna } from 'lucide-react'
@@ -27,13 +28,14 @@ export default function Nav() {
         <div className="flex justify-between h-12">
           <div className="flex items-center gap-6">
             {/* Logo */}
-            <Link href={isPM ? '/dashboard' : '/submit'} className="flex items-center gap-2">
-              <span
-                className="inline-flex items-center justify-center w-7 h-7 rounded-md text-xs font-black"
-                style={{ background: 'var(--gold)', color: '#000' }}
-              >
-                CC
-              </span>
+            <Link href={isPM ? '/dashboard' : '/submit'} className="flex items-center gap-1.5">
+              <Image
+                src="/cc-logo.png"
+                alt="Content Cartel"
+                width={32}
+                height={32}
+                className="rounded"
+              />
               <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>QC</span>
             </Link>
 

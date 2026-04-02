@@ -2,84 +2,143 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { motion } from 'framer-motion'
-import { Dna, Check, Clock, AlertCircle, ExternalLink, RefreshCw, Zap } from 'lucide-react'
+import { Dna, ExternalLink, RefreshCw, Sparkles, Check, Clock, FileText, Loader2, X, Copy, AlertCircle } from 'lucide-react'
 import Link from 'next/link'
 import Nav from '@/components/nav'
 import { createClient } from '@/lib/supabase/client'
-import type { ClientDNA } from '@/lib/dna/types'
-import { parseDNASections } from '@/lib/dna/parser'
 
-interface ClientWithDNA {
+interface ClientRow {
   id: number
   name: string
   phase: string
-  latestDna: ClientDNA | null
-  healthScore: number | null
-  highConfCount: number
-  totalSections: number
+  dna_doc_url: string | null
+  prompt_version: number
+  prompt_generated_at: string | null
+  has_transcripts: boolean
+  transcript_count: number
 }
 
 export default function DNADashboardPage() {
   const supabase = createClient()
-  const [clients, setClients] = useState<ClientWithDNA[]>([])
+  const [clients, setClients] = useState<ClientRow[]>([])
   const [loading, setLoading] = useState(true)
+  const [generatingFor, setGeneratingFor] = useState<number | null>(null)
+  const [showPromptModal, setShowPromptModal] = useState(false)
+  const [promptContent, setPromptContent] = useState('')
+  const [promptClientName, setPromptClientName] = useState('')
+  const [promptStreaming, setPromptStreaming] = useState(false)
 
   const loadClients = useCallback(async () => {
     setLoading(true)
 
-    const { data: clientData } = await supabase
-      .from('clients')
-      .select('id, name, phase')
-      .in('phase', ['production', 'active', 'onboarding'])
-      .order('name')
+    const [{ data: clientData }, { data: settings }, { data: prompts }, { data: transcripts }] = await Promise.all([
+      supabase.from('clients').select('id, name, phase').in('phase', ['production', 'active', 'onboarding', 'special']).order('name'),
+      supabase.from('client_settings').select('client_id, dna_doc_url'),
+      supabase.from('client_prompts').select('client_id, version, created_at').eq('prompt_type', 'content_generation').order('version', { ascending: false }),
+      supabase.from('client_transcripts').select('client_id').not('relevance_tag', 'in', '("onboarding","strategy")'),
+    ])
 
-    if (!clientData) {
-      setLoading(false)
-      return
+    if (!clientData) { setLoading(false); return }
+
+    const settingsMap: Record<number, string> = {}
+    for (const s of (settings || [])) {
+      settingsMap[s.client_id] = s.dna_doc_url || ''
     }
 
-    const { data: dnaData } = await supabase
-      .from('client_dna')
-      .select('*')
-      .order('version', { ascending: false })
-
-    const dnaByClient = new Map<number, ClientDNA>()
-    if (dnaData) {
-      for (const dna of dnaData) {
-        if (!dnaByClient.has(dna.client_id)) {
-          dnaByClient.set(dna.client_id, dna as ClientDNA)
-        }
+    // Latest prompt per client
+    const promptMap: Record<number, { version: number; created_at: string }> = {}
+    for (const p of (prompts || [])) {
+      if (!promptMap[p.client_id]) {
+        promptMap[p.client_id] = { version: p.version, created_at: p.created_at }
       }
     }
 
-    setClients(clientData.map(c => {
-      const latestDna = dnaByClient.get(c.id) || null
-      let healthScore: number | null = null
-      let highConfCount = 0
-      let totalSections = 0
+    // Transcript counts per client (content only)
+    const transcriptCounts: Record<number, number> = {}
+    for (const t of (transcripts || [])) {
+      transcriptCounts[t.client_id] = (transcriptCounts[t.client_id] || 0) + 1
+    }
 
-      if (latestDna?.dna_markdown) {
-        const parsed = parseDNASections(latestDna.dna_markdown)
-        healthScore = parsed.overallScore
-        highConfCount = parsed.highConfCount
-        totalSections = parsed.sections.length
-      }
-
-      return { ...c, latestDna, healthScore, highConfCount, totalSections }
-    }))
+    setClients(clientData.map(c => ({
+      ...c,
+      dna_doc_url: settingsMap[c.id] || null,
+      prompt_version: promptMap[c.id]?.version || 0,
+      prompt_generated_at: promptMap[c.id]?.created_at || null,
+      has_transcripts: (transcriptCounts[c.id] || 0) > 0,
+      transcript_count: transcriptCounts[c.id] || 0,
+    })))
     setLoading(false)
   }, [supabase])
 
   useEffect(() => { loadClients() }, [loadClients])
 
-  const withDna = clients.filter(c => c.latestDna)
-  const withoutDna = clients.filter(c => !c.latestDna)
+  async function handleGeneratePrompt(clientId: number, clientName: string) {
+    setGeneratingFor(clientId)
+    setShowPromptModal(true)
+    setPromptStreaming(true)
+    setPromptContent('')
+    setPromptClientName(clientName)
 
-  function getScoreColor(score: number) {
-    if (score > 70) return 'var(--green)'
-    if (score > 40) return 'var(--amber)'
-    return 'var(--red)'
+    try {
+      const res = await fetch('/api/content/generate-prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_id: clientId }),
+      })
+
+      const reader = res.body?.getReader()
+      const decoder = new TextDecoder()
+      let accumulated = ''
+
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          const chunk = decoder.decode(value, { stream: true })
+          for (const line of chunk.split('\n')) {
+            if (line.startsWith('data: ')) {
+              try {
+                const event = JSON.parse(line.slice(6))
+                if (event.type === 'text') {
+                  accumulated += event.content
+                  setPromptContent(accumulated)
+                } else if (event.type === 'done') {
+                  break
+                }
+              } catch { /* skip */ }
+            }
+          }
+        }
+      }
+    } catch {
+      setPromptContent('Error generating prompt. Please try again.')
+    } finally {
+      setPromptStreaming(false)
+      setGeneratingFor(null)
+      loadClients()
+    }
   }
+
+  async function handleViewPrompt(clientId: number, clientName: string) {
+    setShowPromptModal(true)
+    setPromptClientName(clientName)
+    setPromptContent('Loading...')
+    setPromptStreaming(false)
+
+    const { data } = await supabase
+      .from('client_prompts')
+      .select('system_prompt')
+      .eq('client_id', clientId)
+      .eq('prompt_type', 'content_generation')
+      .order('version', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+
+    setPromptContent(data?.system_prompt || 'No prompt found.')
+  }
+
+  const withPrompt = clients.filter(c => c.prompt_version > 0)
+  const withoutPrompt = clients.filter(c => c.prompt_version === 0)
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg)' }}>
@@ -91,35 +150,36 @@ export default function DNADashboardPage() {
           <div>
             <h1 className="text-xl font-bold flex items-center gap-2" style={{ color: 'var(--text)' }}>
               <Dna size={20} style={{ color: 'var(--gold)' }} />
-              Client DNA Profiles
+              Client DNA & Prompts
             </h1>
             <p className="text-xs mt-1" style={{ color: 'var(--text-3)' }}>
-              Generate and manage brand DNA for each client
+              DNA docs (manual) + master prompts (auto-generated from transcripts)
             </p>
           </div>
-          <button
-            onClick={loadClients}
-            className="btn-ghost text-xs flex items-center gap-1.5"
-          >
+          <button onClick={loadClients} className="btn-ghost text-xs flex items-center gap-1.5">
             <RefreshCw size={12} />
             Refresh
           </button>
         </div>
 
-        {/* Stats bar */}
+        {/* Stats */}
         {!loading && clients.length > 0 && (
-          <div className="grid grid-cols-3 gap-3 mb-6">
+          <div className="grid grid-cols-4 gap-3 mb-6">
             <div className="card p-3 text-center">
               <p className="text-2xl font-bold" style={{ color: 'var(--text)' }}>{clients.length}</p>
-              <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-3)' }}>Total Clients</p>
+              <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-3)' }}>Clients</p>
             </div>
             <div className="card p-3 text-center">
-              <p className="text-2xl font-bold" style={{ color: 'var(--green)' }}>{withDna.length}</p>
-              <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-3)' }}>DNA Generated</p>
+              <p className="text-2xl font-bold" style={{ color: 'var(--green)' }}>{withPrompt.length}</p>
+              <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-3)' }}>Have Prompts</p>
             </div>
             <div className="card p-3 text-center">
-              <p className="text-2xl font-bold" style={{ color: 'var(--amber)' }}>{withoutDna.length}</p>
-              <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-3)' }}>Needs DNA</p>
+              <p className="text-2xl font-bold" style={{ color: 'var(--blue)' }}>{clients.filter(c => c.dna_doc_url && c.dna_doc_url.startsWith('http')).length}</p>
+              <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-3)' }}>DNA Docs</p>
+            </div>
+            <div className="card p-3 text-center">
+              <p className="text-2xl font-bold" style={{ color: 'var(--amber)' }}>{clients.filter(c => c.has_transcripts).length}</p>
+              <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-3)' }}>Have Transcripts</p>
             </div>
           </div>
         )}
@@ -127,123 +187,125 @@ export default function DNADashboardPage() {
         {loading ? (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             {[1, 2, 3, 4, 5, 6].map(i => (
-              <div key={i} className="card p-4 animate-shimmer h-36" />
+              <div key={i} className="card p-4 animate-shimmer h-32" />
             ))}
           </div>
         ) : (
           <>
-            {/* Clients without DNA */}
-            {withoutDna.length > 0 && (
+            {/* Needs Prompt */}
+            {withoutPrompt.length > 0 && (
               <div className="mb-6">
                 <h2 className="text-xs font-medium uppercase tracking-wider mb-3 flex items-center gap-1.5" style={{ color: 'var(--text-3)' }}>
                   <AlertCircle size={12} style={{ color: 'var(--amber)' }} />
-                  Needs DNA ({withoutDna.length})
+                  Needs Prompt ({withoutPrompt.length})
                 </h2>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {withoutDna.map((client, i) => (
-                    <motion.div
-                      key={client.id}
-                      initial={{ opacity: 0, y: 8 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ delay: i * 0.03 }}
-                    >
-                      <Link
-                        href={`/dna/generate/${client.id}`}
-                        className="card p-4 block group"
-                        style={{ borderColor: 'rgba(245, 158, 11, 0.3)' }}
-                      >
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>
-                            {client.name}
-                          </span>
+                  {withoutPrompt.map((client, i) => (
+                    <motion.div key={client.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.03 }}>
+                      <div className="card p-4" style={{ borderColor: 'rgba(245, 158, 11, 0.3)' }}>
+                        <div className="flex items-center justify-between mb-3">
+                          <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>{client.name}</span>
                           <span className="badge badge-neutral text-[10px]">{client.phase}</span>
                         </div>
-                        <div className="flex items-center gap-1.5 text-xs font-medium mt-2 group-hover:gap-2 transition-all" style={{ color: 'var(--gold)' }}>
-                          <Zap size={12} />
-                          Generate DNA
-                        </div>
-                      </Link>
+                        <button
+                          onClick={() => handleGeneratePrompt(client.id, client.name)}
+                          disabled={generatingFor === client.id}
+                          className="w-full flex items-center justify-center gap-1.5 text-xs font-medium py-2 rounded-lg transition-all"
+                          style={{ background: 'rgba(212, 168, 67, 0.1)', color: 'var(--gold)', border: '1px solid rgba(212, 168, 67, 0.3)' }}
+                        >
+                          {generatingFor === client.id ? (
+                            <><Loader2 size={12} className="animate-spin" /> Generating...</>
+                          ) : (
+                            <><Sparkles size={12} /> Generate Prompt</>
+                          )}
+                        </button>
+                      </div>
                     </motion.div>
                   ))}
                 </div>
               </div>
             )}
 
-            {/* Clients with DNA */}
-            {withDna.length > 0 && (
+            {/* Has Prompt */}
+            {withPrompt.length > 0 && (
               <div>
                 <h2 className="text-xs font-medium uppercase tracking-wider mb-3 flex items-center gap-1.5" style={{ color: 'var(--text-3)' }}>
                   <Check size={12} style={{ color: 'var(--green)' }} />
-                  DNA Generated ({withDna.length})
+                  Active ({withPrompt.length})
                 </h2>
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                  {withDna.map((client, i) => (
-                    <motion.div
-                      key={client.id}
-                      initial={{ opacity: 0, y: 8 }}
-                      animate={{ opacity: 1, y: 0 }}
-                      transition={{ delay: i * 0.03 }}
-                    >
+                  {withPrompt.map((client, i) => (
+                    <motion.div key={client.id} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: i * 0.03 }}>
                       <div className="card-glow p-4">
                         <div className="flex items-center justify-between mb-2">
-                          <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>
-                            {client.name}
-                          </span>
-                          <div className="flex items-center gap-1.5">
-                            {client.healthScore !== null && (
-                              <span
-                                className="text-[10px] font-bold px-1.5 py-0.5 rounded"
-                                style={{
-                                  color: getScoreColor(client.healthScore),
-                                  background: `color-mix(in srgb, ${getScoreColor(client.healthScore)} 15%, transparent)`,
-                                }}
-                              >
-                                {client.healthScore}%
-                              </span>
+                          <span className="text-sm font-semibold" style={{ color: 'var(--text)' }}>{client.name}</span>
+                          <span className="badge badge-green text-[10px]">Prompt v{client.prompt_version}</span>
+                        </div>
+
+                        {/* Status indicators */}
+                        <div className="space-y-1.5 mb-3">
+                          {/* DNA Doc */}
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>DNA Doc</span>
+                            {client.dna_doc_url && client.dna_doc_url.startsWith('http') && !client.dna_doc_url.includes('qc.contentcartel') ? (
+                              <a href={client.dna_doc_url} target="_blank" rel="noopener noreferrer"
+                                className="text-[10px] flex items-center gap-1 font-medium" style={{ color: 'var(--blue)' }}>
+                                <ExternalLink size={9} /> Open Doc
+                              </a>
+                            ) : (
+                              <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>Not linked</span>
                             )}
-                            <span className="badge badge-green text-[10px]">v{client.latestDna!.version}</span>
                           </div>
+
+                          {/* Transcripts */}
+                          <div className="flex items-center justify-between">
+                            <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>YouTube Transcripts</span>
+                            <span className="text-[10px] font-medium" style={{ color: client.has_transcripts ? 'var(--green)' : 'var(--text-3)' }}>
+                              {client.transcript_count > 0 ? `${client.transcript_count} videos` : 'None'}
+                            </span>
+                          </div>
+
+                          {/* Prompt age */}
+                          {client.prompt_generated_at && (
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>Prompt Generated</span>
+                              <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>
+                                <Clock size={9} className="inline mr-0.5" />
+                                {new Date(client.prompt_generated_at).toLocaleDateString()}
+                              </span>
+                            </div>
+                          )}
                         </div>
 
-                        {/* Health bar */}
-                        {client.healthScore !== null && (
-                          <div className="mb-3">
-                            <div className="flex items-center justify-between text-[10px] mb-1" style={{ color: 'var(--text-3)' }}>
-                              <span>{client.highConfCount}/{client.totalSections} sections confident</span>
-                            </div>
-                            <div className="h-1 rounded-full overflow-hidden" style={{ background: 'var(--surface-2)' }}>
-                              <div
-                                className="h-full rounded-full transition-all duration-500"
-                                style={{
-                                  width: `${client.healthScore}%`,
-                                  background: getScoreColor(client.healthScore),
-                                }}
-                              />
-                            </div>
-                          </div>
-                        )}
-
-                        <div className="text-[10px] mb-3" style={{ color: 'var(--text-3)' }}>
-                          <Clock size={10} className="inline mr-1" />
-                          {new Date(client.latestDna!.created_at).toLocaleDateString()}
-                        </div>
-
+                        {/* Actions */}
                         <div className="flex items-center gap-2">
-                          <Link
-                            href={`/dna/${client.id}`}
+                          <button
+                            onClick={() => handleViewPrompt(client.id, client.name)}
                             className="flex items-center gap-1 text-xs font-medium"
                             style={{ color: 'var(--gold)' }}
                           >
-                            <ExternalLink size={11} />
-                            View
-                          </Link>
-                          <Link
-                            href={`/dna/generate/${client.id}`}
+                            <FileText size={11} />
+                            View Prompt
+                          </button>
+                          <button
+                            onClick={() => handleGeneratePrompt(client.id, client.name)}
+                            disabled={generatingFor === client.id}
                             className="flex items-center gap-1 text-xs font-medium"
                             style={{ color: 'var(--text-3)' }}
                           >
-                            <RefreshCw size={11} />
-                            Regenerate
+                            {generatingFor === client.id ? (
+                              <><Loader2 size={11} className="animate-spin" /> Generating...</>
+                            ) : (
+                              <><RefreshCw size={11} /> Regenerate</>
+                            )}
+                          </button>
+                          <Link
+                            href={`/dna/${client.id}`}
+                            className="flex items-center gap-1 text-xs font-medium ml-auto"
+                            style={{ color: 'var(--text-3)' }}
+                          >
+                            <Dna size={11} />
+                            Old DNA
                           </Link>
                         </div>
                       </div>
@@ -252,16 +314,72 @@ export default function DNADashboardPage() {
                 </div>
               </div>
             )}
-
-            {clients.length === 0 && (
-              <div className="card p-8 text-center">
-                <Dna size={32} className="mx-auto mb-3" style={{ color: 'var(--text-3)' }} />
-                <p className="text-sm" style={{ color: 'var(--text-2)' }}>No clients found</p>
-              </div>
-            )}
           </>
         )}
       </main>
+
+      {/* Prompt Modal */}
+      {showPromptModal && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: 'rgba(0,0,0,0.6)' }}
+          onClick={(e) => { if (e.target === e.currentTarget && !promptStreaming) setShowPromptModal(false) }}
+        >
+          <motion.div
+            initial={{ scale: 0.95, opacity: 0 }}
+            animate={{ scale: 1, opacity: 1 }}
+            className="card p-6 w-full max-w-3xl max-h-[90vh] flex flex-col"
+            style={{ boxShadow: '0 25px 50px rgba(0,0,0,0.5)' }}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Sparkles size={16} style={{ color: 'var(--gold)' }} />
+                <h3 className="text-sm font-bold" style={{ color: 'var(--text)' }}>
+                  {promptClientName} — Master Prompt
+                </h3>
+              </div>
+              {!promptStreaming && (
+                <button onClick={() => setShowPromptModal(false)} className="p-1 rounded hover:bg-[var(--surface-2)]">
+                  <X size={14} style={{ color: 'var(--text-3)' }} />
+                </button>
+              )}
+            </div>
+
+            {promptStreaming && (
+              <div className="flex items-center gap-2 mb-3">
+                <Loader2 size={14} className="animate-spin" style={{ color: 'var(--gold)' }} />
+                <p className="text-[11px]" style={{ color: 'var(--text-3)' }}>Generating with Claude Opus...</p>
+              </div>
+            )}
+
+            <div className="flex-1 min-h-0 overflow-y-auto mb-4">
+              <pre className="text-xs leading-relaxed whitespace-pre-wrap rounded-lg p-4"
+                style={{ color: 'var(--text-2)', background: 'var(--surface-2)', minHeight: '300px' }}>
+                {promptContent || 'Loading...'}
+              </pre>
+            </div>
+
+            {!promptStreaming && promptContent && promptContent !== 'Loading...' && (
+              <div className="flex items-center justify-between">
+                <p className="text-[11px]" style={{ color: 'var(--text-3)' }}>
+                  {promptContent.length.toLocaleString()} characters
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => navigator.clipboard.writeText(promptContent)}
+                    className="btn-ghost text-xs flex items-center gap-1.5"
+                  >
+                    <Copy size={12} /> Copy
+                  </button>
+                  <button onClick={() => setShowPromptModal(false)} className="btn-primary text-xs">Done</button>
+                </div>
+              </div>
+            )}
+          </motion.div>
+        </motion.div>
+      )}
     </div>
   )
 }

@@ -18,6 +18,7 @@ export default function PipelinePage() {
   const { isPM } = useAuth()
   const [submissions, setSubmissions] = useState<QCSubmission[]>([])
   const [loading, setLoading] = useState(true)
+  const [clientFilter, setClientFilter] = useState('all')
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -65,9 +66,17 @@ export default function PipelinePage() {
     await load()
   }
 
+  // Unique client names for filter dropdown
+  const clientNames = Array.from(new Set(submissions.map(s => s.client_name || 'Unknown'))).sort()
+
+  // Apply client filter
+  const filteredSubmissions = clientFilter === 'all'
+    ? submissions
+    : submissions.filter(s => (s.client_name || 'Unknown') === clientFilter)
+
   const columns = PIPELINE_STAGES.map(stage => ({
     ...stage,
-    items: submissions.filter(s => s.current_pipeline_stage === stage.key),
+    items: filteredSubmissions.filter(s => s.current_pipeline_stage === stage.key),
   }))
 
   return (
@@ -79,13 +88,31 @@ export default function PipelinePage() {
           <div>
             <h1 className="text-xl font-bold" style={{ color: 'var(--text)' }}>Pipeline Board</h1>
             <p className="text-xs mt-0.5" style={{ color: 'var(--text-3)' }}>
-              {submissions.length} submissions across {PIPELINE_STAGES.length} stages
+              {filteredSubmissions.length} submissions across {PIPELINE_STAGES.length} stages
+              {clientFilter !== 'all' && ` · ${clientFilter}`}
             </p>
           </div>
-          <button onClick={load} className="btn-secondary text-xs flex items-center gap-1.5">
-            <RefreshCw size={12} />
-            Refresh
-          </button>
+          <div className="flex items-center gap-2">
+            <select
+              value={clientFilter}
+              onChange={(e) => setClientFilter(e.target.value)}
+              className="text-xs px-3 py-1.5 rounded-lg appearance-none cursor-pointer"
+              style={{
+                background: 'var(--surface)',
+                color: clientFilter === 'all' ? 'var(--text-3)' : 'var(--gold)',
+                border: `1px solid ${clientFilter === 'all' ? 'var(--border)' : 'var(--gold)'}`,
+              }}
+            >
+              <option value="all">All Clients</option>
+              {clientNames.map(name => (
+                <option key={name} value={name}>{name}</option>
+              ))}
+            </select>
+            <button onClick={load} className="btn-secondary text-xs flex items-center gap-1.5">
+              <RefreshCw size={12} />
+              Refresh
+            </button>
+          </div>
         </div>
 
         {/* Kanban board */}

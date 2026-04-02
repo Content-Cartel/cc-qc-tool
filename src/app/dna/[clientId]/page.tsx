@@ -6,7 +6,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import {
   Dna, ArrowLeft, Copy, Check, RefreshCw, Clock,
   ChevronDown, ChevronUp, FileText,
-  Zap, AlertTriangle, X, Loader2, Target,
+  Zap, AlertTriangle, X, Loader2, Target, Sparkles,
 } from 'lucide-react'
 import Nav from '@/components/nav'
 import { createClient } from '@/lib/supabase/client'
@@ -208,6 +208,10 @@ export default function DNAViewerPage() {
 
   const [copied, setCopied] = useState('')
   const [showVersionDropdown, setShowVersionDropdown] = useState(false)
+  const [showPromptGen, setShowPromptGen] = useState(false)
+  const [promptGenStreaming, setPromptGenStreaming] = useState(false)
+  const [promptGenContent, setPromptGenContent] = useState('')
+  const [promptGenVersion, setPromptGenVersion] = useState<number | null>(null)
 
   const sectionRefs = useRef<Record<number, HTMLDivElement | null>>({})
 
@@ -262,6 +266,51 @@ export default function DNAViewerPage() {
     navigator.clipboard.writeText(text)
     setCopied(type)
     setTimeout(() => setCopied(''), 2000)
+  }
+
+  async function handleGeneratePrompt() {
+    setShowPromptGen(true)
+    setPromptGenStreaming(true)
+    setPromptGenContent('')
+    setPromptGenVersion(null)
+
+    try {
+      const res = await fetch('/api/content/generate-prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ client_id: clientId }),
+      })
+
+      const reader = res.body?.getReader()
+      const decoder = new TextDecoder()
+      let accumulated = ''
+
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          const chunk = decoder.decode(value, { stream: true })
+          for (const line of chunk.split('\n')) {
+            if (line.startsWith('data: ')) {
+              try {
+                const event = JSON.parse(line.slice(6))
+                if (event.type === 'text') {
+                  accumulated += event.content
+                  setPromptGenContent(accumulated)
+                } else if (event.type === 'done') {
+                  setPromptGenVersion(event.version)
+                  break
+                }
+              } catch { /* skip */ }
+            }
+          }
+        }
+      }
+    } catch {
+      setPromptGenContent('Error generating prompt. Please try again.')
+    } finally {
+      setPromptGenStreaming(false)
+    }
   }
 
   function openRegenModal(sectionNum: number) {
@@ -579,6 +628,14 @@ export default function DNAViewerPage() {
                     {copied === 'markdown' ? 'Copied!' : 'Full Copy'}
                   </button>
                   <button
+                    onClick={handleGeneratePrompt}
+                    className="btn-ghost text-xs flex items-center gap-1.5"
+                    style={{ color: 'var(--gold)' }}
+                  >
+                    <Sparkles size={12} />
+                    Generate Prompt
+                  </button>
+                  <button
                     onClick={() => router.push(`/dna/generate/${clientId}`)}
                     className="btn-primary text-xs flex items-center gap-1.5"
                   >
@@ -836,6 +893,88 @@ export default function DNAViewerPage() {
                   )}
                 </button>
               </div>
+            </motion.div>
+          </motion.div>
+        )}
+        {/* Generate Prompt Modal */}
+        {showPromptGen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            style={{ background: 'rgba(0,0,0,0.6)' }}
+            onClick={(e) => { if (e.target === e.currentTarget && !promptGenStreaming) setShowPromptGen(false) }}
+          >
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              className="card p-6 w-full max-w-3xl max-h-[90vh] flex flex-col"
+              style={{ boxShadow: '0 25px 50px rgba(0,0,0,0.5)' }}
+            >
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-2">
+                  <Sparkles size={16} style={{ color: 'var(--gold)' }} />
+                  <h3 className="text-sm font-bold" style={{ color: 'var(--text)' }}>
+                    {promptGenStreaming ? 'Generating System Prompt...' : promptGenVersion ? `System Prompt Saved (v${promptGenVersion})` : 'System Prompt'}
+                  </h3>
+                </div>
+                {!promptGenStreaming && (
+                  <button
+                    onClick={() => setShowPromptGen(false)}
+                    className="p-1 rounded hover:bg-[var(--surface-2)] transition-colors"
+                  >
+                    <X size={14} style={{ color: 'var(--text-3)' }} />
+                  </button>
+                )}
+              </div>
+
+              {promptGenStreaming && (
+                <div className="flex items-center gap-2 mb-3">
+                  <Loader2 size={14} className="animate-spin" style={{ color: 'var(--gold)' }} />
+                  <p className="text-[11px]" style={{ color: 'var(--text-3)' }}>
+                    Using Claude Opus to transform DNA into operational prompt (30-90 seconds)...
+                  </p>
+                </div>
+              )}
+
+              <div className="flex-1 min-h-0 mb-4 overflow-y-auto">
+                <pre
+                  className="text-xs leading-relaxed whitespace-pre-wrap rounded-lg p-4"
+                  style={{ color: 'var(--text-2)', background: 'var(--surface-2)', minHeight: '300px' }}
+                >
+                  {promptGenContent || 'Preparing...'}
+                </pre>
+              </div>
+
+              {!promptGenStreaming && promptGenContent && (
+                <div className="flex items-center justify-between">
+                  <p className="text-[11px]" style={{ color: 'var(--text-3)' }}>
+                    {promptGenContent.length.toLocaleString()} characters
+                    {promptGenVersion && ` | Saved as version ${promptGenVersion}`}
+                  </p>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => {
+                        navigator.clipboard.writeText(promptGenContent)
+                        setCopied('prompt')
+                        setTimeout(() => setCopied(''), 2000)
+                      }}
+                      className="btn-ghost text-xs flex items-center gap-1.5"
+                    >
+                      {copied === 'prompt' ? <Check size={12} /> : <Copy size={12} />}
+                      {copied === 'prompt' ? 'Copied!' : 'Copy'}
+                    </button>
+                    <button
+                      onClick={() => setShowPromptGen(false)}
+                      className="btn-primary text-xs"
+                    >
+                      Done
+                    </button>
+                  </div>
+                </div>
+              )}
             </motion.div>
           </motion.div>
         )}

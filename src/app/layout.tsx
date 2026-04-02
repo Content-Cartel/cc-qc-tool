@@ -11,6 +11,10 @@ const geistSans = localFont({
 export const metadata: Metadata = {
   title: "CC QC Tool | Content Cartel",
   description: "Production QC tool for Content Cartel",
+  icons: {
+    icon: '/favicon.png',
+    apple: '/cc-logo.png',
+  },
 };
 
 export default function RootLayout({

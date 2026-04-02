@@ -1,0 +1,292 @@
+{
+  "name": "CC QC — Drive Raw Footage Intake",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyMinute",
+              "value": 5
+            }
+          ]
+        },
+        "triggerOn": "specificFolder",
+        "folderToWatch": "={{ $parameter.folderToWatch }}",
+        "event": "fileCreated",
+        "options": {}
+      },
+      "id": "trigger-drive",
+      "name": "Watch Drive Folders",
+      "type": "n8n-nodes-base.googleDriveTrigger",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "notes": "SETUP: Click this node and select your parent 'Clients' folder from Google Drive. This watches for new files created in that folder and all subfolders."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "filter-video",
+              "leftValue": "={{ $json.mimeType }}",
+              "rightValue": "video/",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "filter-videos",
+      "name": "Is Video File?",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [460, 300],
+      "notes": "Only process video files (mp4, mov, etc). Skips documents, images, and other file types."
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "fileId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "={{ $json.parents ? $json.parents[0] : '' }}"
+        }
+      },
+      "id": "get-parent-folder",
+      "name": "Get Parent Folder Info",
+      "type": "n8n-nodes-base.googleDrive",
+      "typeVersion": 3,
+      "position": [680, 300],
+      "notes": "Gets the parent folder name so we can extract the client name from the folder structure."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "set-client",
+              "name": "client_name",
+              "value": "={{ $('Get Parent Folder Info').item.json.name.replace('/Raw Footage', '').replace('/raw footage', '').replace('/Raw', '').trim() }}",
+              "type": "string"
+            },
+            {
+              "id": "set-filename",
+              "name": "file_name",
+              "value": "={{ $('Watch Drive Folders').item.json.name }}",
+              "type": "string"
+            },
+            {
+              "id": "set-driveurl",
+              "name": "drive_url",
+              "value": "=https://drive.google.com/file/d/{{ $('Watch Drive Folders').item.json.id }}/view",
+              "type": "string"
+            },
+            {
+              "id": "set-contenttype",
+              "name": "content_type",
+              "value": "lf_video",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "build-payload",
+      "name": "Build Intake Payload",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [900, 300],
+      "notes": "Builds the JSON payload for the QC tool intake API. Extracts client name from the parent folder name."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://qc.contentcartel.net/api/intake",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-webhook-secret",
+              "value": "cc-intake-2026"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ client_name: $json.client_name, file_name: $json.file_name, drive_url: $json.drive_url, content_type: $json.content_type }) }}",
+        "options": {}
+      },
+      "id": "post-to-qc",
+      "name": "POST to QC Intake",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 300],
+      "notes": "Sends the new file to the QC tool intake API. Creates a submission at the 'raw_footage' pipeline stage."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "check-success",
+              "leftValue": "={{ $json.success }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-result",
+      "name": "Success?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1340, 300],
+      "notes": "Checks if the QC tool accepted the submission."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "log-success",
+              "name": "log",
+              "value": "=Successfully created submission {{ $('POST to QC Intake').item.json.submission_id }} for {{ $('Build Intake Payload').item.json.client_name }}: {{ $('Build Intake Payload').item.json.file_name }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "log-success",
+      "name": "Log Success",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1560, 200],
+      "notes": "Logs successful intake. You can replace this with a Slack notification if you want."
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "log-error",
+              "name": "error",
+              "value": "=Failed to create submission for {{ $('Build Intake Payload').item.json.file_name }}: {{ $('POST to QC Intake').item.json.error }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "log-error",
+      "name": "Log Error",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1560, 400],
+      "notes": "Logs failed intake. Replace with Slack notification to get alerted on failures."
+    }
+  ],
+  "connections": {
+    "Watch Drive Folders": {
+      "main": [
+        [
+          {
+            "node": "Is Video File?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Video File?": {
+      "main": [
+        [
+          {
+            "node": "Get Parent Folder Info",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Parent Folder Info": {
+      "main": [
+        [
+          {
+            "node": "Build Intake Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Intake Payload": {
+      "main": [
+        [
+          {
+            "node": "POST to QC Intake",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "POST to QC Intake": {
+      "main": [
+        [
+          {
+            "node": "Success?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Success?": {
+      "main": [
+        [
+          {
+            "node": "Log Success",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": [
+    {
+      "name": "QC Tool"
+    }
+  ]
+}
