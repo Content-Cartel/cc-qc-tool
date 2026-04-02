@@ -92,7 +92,7 @@ export async function POST(req: NextRequest) {
         }
 
         // Stage 1.5: Sync & select transcripts from Fathom + YouTube
-        let selectedTranscripts: TranscriptForDNA[] = []
+        const selectedTranscripts: TranscriptForDNA[] = []
         let fathomSyncResult: { found: number; new_synced: number; already_stored: number } | null = null
 
         const supabase = createClient(
@@ -145,10 +145,15 @@ export async function POST(req: NextRequest) {
             const onboarding = allTranscripts.filter(t => t.relevance_tag === 'onboarding')
             // Priority 2: Strategy transcripts
             const strategy = allTranscripts.filter(t => t.relevance_tag === 'strategy')
-            // Priority 3: YouTube transcripts sorted by view count
+            // Priority 3: YouTube transcripts — prefer Whisper over captions, then by view count
             const ytTranscripts = allTranscripts
               .filter(t => t.source === 'youtube')
-              .sort((a, b) => (Number(b.metadata?.view_count) || 0) - (Number(a.metadata?.view_count) || 0))
+              .sort((a, b) => {
+                const aWhisper = (a.metadata as Record<string, unknown>)?.source_method === 'whisper' ? 1 : 0
+                const bWhisper = (b.metadata as Record<string, unknown>)?.source_method === 'whisper' ? 1 : 0
+                if (bWhisper !== aWhisper) return bWhisper - aWhisper
+                return (Number((b.metadata as Record<string, unknown>)?.view_count) || 0) - (Number((a.metadata as Record<string, unknown>)?.view_count) || 0)
+              })
               .slice(0, 5)
             // Priority 4: Other meetings (most recent)
             const general = allTranscripts.filter(t =>

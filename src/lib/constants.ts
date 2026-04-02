@@ -16,8 +16,6 @@ export type QCChecklistKey = typeof QC_CHECKLIST_ITEMS[number]['key']
 export const PIPELINE_STAGES = [
   { key: 'raw_footage', label: 'Raw Footage', icon: 'Film', sla: 'Day 0' },
   { key: 'ai_auto_clean', label: 'AI Clean', icon: 'Sparkles', sla: '4 hours' },
-  { key: 'ai_auto_cut', label: 'AI Cut', icon: 'Scissors', sla: 'Auto' },
-  { key: 'transcript_instructions', label: 'Transcript', icon: 'FileText', sla: 'Auto' },
   { key: 'editor_polish', label: 'Editor Polish', icon: 'Pen', sla: '24 hours' },
   { key: 'qc_review', label: 'QC Review', icon: 'CheckSquare', sla: '2-3 hours' },
   { key: 'package', label: 'Package', icon: 'Package', sla: '1 hour' },
@@ -54,5 +52,7 @@ export const NOTE_CATEGORIES = [
   { key: 'brand', label: 'Brand' },
   { key: 'copy', label: 'Copy/Text' },
   { key: 'audio', label: 'Audio' },
+  { key: 'spelling', label: 'Spelling' },
   { key: 'other', label: 'Other' },
+  { key: 'client_feedback', label: 'Client Feedback' },
 ] as const
