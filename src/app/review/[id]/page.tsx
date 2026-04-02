@@ -903,6 +903,7 @@ export default function ReviewPage() {
                   onDeleteNote={handleDeleteNote}
                   onSaveAnnotation={handleSaveAnnotation}
                   readOnly={!isPM}
+                  canResolve={true}
                 />
               )}
 

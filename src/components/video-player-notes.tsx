@@ -19,6 +19,7 @@ interface VideoPlayerNotesProps {
   onDeleteNote?: (noteId: string) => Promise<void>
   onSaveAnnotation?: (imageDataUrl: string, timestampSeconds: number) => Promise<void>
   readOnly?: boolean
+  canResolve?: boolean
 }
 
 function formatTimestamp(seconds: number): string {
@@ -56,6 +57,7 @@ export default function VideoPlayerNotes({
   onDeleteNote,
   onSaveAnnotation,
   readOnly = false,
+  canResolve = false,
 }: VideoPlayerNotesProps) {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const playerRef = useRef<any>(null)
@@ -415,10 +417,9 @@ export default function VideoPlayerNotes({
                     </>
                   )}
                 </div>
-                {!readOnly && editingNoteId !== note.id && (
+                {editingNoteId !== note.id && (
                   <div className="flex items-center gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-                    {!note.is_resolved && (
-                      <>
+                    {!note.is_resolved && !readOnly && (
                         <button
                           onClick={(e) => {
                             e.stopPropagation()
@@ -433,6 +434,8 @@ export default function VideoPlayerNotes({
                         >
                           <Pencil size={12} />
                         </button>
+                    )}
+                    {!note.is_resolved && (canResolve || !readOnly) && (
                         <button
                           onClick={(e) => {
                             e.stopPropagation()
@@ -442,13 +445,12 @@ export default function VideoPlayerNotes({
                           style={{ color: 'var(--text-3)' }}
                           onMouseEnter={(e) => (e.currentTarget.style.color = 'var(--green)')}
                           onMouseLeave={(e) => (e.currentTarget.style.color = 'var(--text-3)')}
-                          title="Mark as resolved"
+                          title="Mark as done"
                         >
                           <Check size={12} />
                         </button>
-                      </>
                     )}
-                    {deletingNoteId === note.id ? (
+                    {!readOnly && (deletingNoteId === note.id ? (
                       <div className="flex items-center gap-1" onClick={(e) => e.stopPropagation()}>
                         <span className="text-[10px]" style={{ color: 'var(--red)' }}>Delete?</span>
                         <button
@@ -483,11 +485,11 @@ export default function VideoPlayerNotes({
                       >
                         <Trash2 size={12} />
                       </button>
-                    )}
+                    ))}
                   </div>
                 )}
-                {note.is_resolved && editingNoteId !== note.id && readOnly && (
-                  <span className="text-[10px] shrink-0" style={{ color: 'var(--green)' }}>Resolved</span>
+                {note.is_resolved && editingNoteId !== note.id && (
+                  <span className="text-[10px] shrink-0" style={{ color: 'var(--green)' }}>Done ✓</span>
                 )}
               </motion.div>
             ))}
