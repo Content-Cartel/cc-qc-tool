@@ -29,6 +29,9 @@ create index if not exists idx_spelling_checks_status
 comment on column client_transcripts.metadata is
   'JSON metadata. For YouTube transcripts, includes source_method: "whisper" | "caption" to track transcription quality.';
 
+-- Add metadata column to qc_submissions for storing Deepgram word timestamps
+alter table qc_submissions add column if not exists metadata jsonb;
+
 -- RLS policies (match existing pattern)
 alter table spelling_check_results enable row level security;
 
