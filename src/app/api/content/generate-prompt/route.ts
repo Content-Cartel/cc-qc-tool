@@ -141,7 +141,10 @@ export async function POST(req: NextRequest) {
         // Onboarding → strategy extraction (business, compliance, audience)
         // YouTube → voice extraction (language patterns, teaching style)
         // General → strategy extraction (supplemental)
-        const [extractedOnboarding, extractedYouTube, extractedGeneral] = await Promise.all([
+        // ALL transcripts → stories extraction (origin stories, client stories, anecdotes)
+        const allTranscriptsForStories = [...onboardingTranscripts, ...youtubeTranscripts, ...generalTranscripts]
+
+        const [extractedOnboarding, extractedYouTube, extractedGeneral, extractedStories] = await Promise.all([
           onboardingTranscripts.length > 0
             ? extractMultipleTranscripts(onboardingTranscripts, 'strategy', anthropicKey, 8000)
             : Promise.resolve([]),
@@ -151,15 +154,24 @@ export async function POST(req: NextRequest) {
           generalTranscripts.length > 0
             ? extractMultipleTranscripts(generalTranscripts, 'strategy', anthropicKey, 5000)
             : Promise.resolve([]),
+          allTranscriptsForStories.length > 0
+            ? extractMultipleTranscripts(allTranscriptsForStories, 'stories', anthropicKey, 5000)
+            : Promise.resolve([]),
         ])
 
-        const extractedCount = [...extractedOnboarding, ...extractedYouTube, ...extractedGeneral].filter(t => t.extracted).length
-        const totalCount = extractedOnboarding.length + extractedYouTube.length + extractedGeneral.length
+        const extractedCount = [...extractedOnboarding, ...extractedYouTube, ...extractedGeneral, ...extractedStories].filter(t => t.extracted).length
+        const totalCount = extractedOnboarding.length + extractedYouTube.length + extractedGeneral.length + extractedStories.length
 
         sendEvent('progress', {
           stage: 'building',
-          message: `Building prompt for ${clientName} from: ${sources.join(', ')} (${extractedCount}/${totalCount} transcripts Haiku-extracted)`,
+          message: `Building prompt for ${clientName} from: ${sources.join(', ')} (${extractedCount}/${totalCount} extractions via Haiku)`,
         })
+
+        // Combine story extractions into a single block
+        const storyBlock = extractedStories
+          .filter(t => t.extracted)
+          .map(t => t.text)
+          .join('\n\n---\n\n')
 
         const transcriptSamples = [
           ...extractedOnboarding.map(t => ({ title: t.title, text: t.text })),
@@ -167,11 +179,17 @@ export async function POST(req: NextRequest) {
           ...extractedGeneral.map(t => ({ title: t.title, text: t.text })),
         ]
 
+        // Add stories as a knowledge entry so it flows into the meta-prompt
+        const allKnowledge = [
+          ...knowledgeEntries,
+          ...(storyBlock ? [{ type: 'stories', content: storyBlock }] : []),
+        ]
+
         const { system, user } = buildMetaPrompt(
           clientName,
           dna?.dna_markdown || null,
           transcriptSamples,
-          knowledgeEntries,
+          allKnowledge,
         )
 
         sendEvent('progress', {

@@ -191,6 +191,46 @@ Format: "THE [NAME] HOOK: [Template] — Example: '[real example from their cont
 
 ---
 
+## LAYER 5B: STORY ARSENAL
+
+This section is what makes content HUMAN. Generic AI can write insights, but it can't invent stories that actually happened. Every story here is real — mined from transcripts and client history. The AI content engine should weave these into posts naturally.
+
+### ORIGIN STORY
+[The client's personal story — how they got started, key turning points, why they do what they do. Include their exact words when possible. This is the foundation story that should be referenced periodically across content.]
+
+### CLIENT SUCCESS STORIES
+[For each story, include:]
+- **[Client/Situation Name]:** Setup → Problem → What changed → Result → Lesson
+- Include the client's exact framing when they told this story
+- Tag each story by topic/pillar so the AI knows when to use it
+
+### WAR STORIES & ANECDOTES
+[Short illustrative stories from their experience. These are the "I remember when..." moments that make content feel real.]
+- Include what point the story illustrates
+- Include enough detail that the AI can retell it authentically
+
+### LESSONS LEARNED THE HARD WAY
+[Mistakes, expensive lessons, things they wish they'd known. These create vulnerability and trust.]
+- What happened
+- What they learned
+- Their exact words (if available)
+
+### RECURRING BELIEFS & THEMES
+[Core convictions that show up across multiple stories. These are the throughlines that connect all their content.]
+- The belief + the story/experience that formed it
+
+### KEY PEOPLE
+[Mentors, partners, team members they reference. These add texture and credibility when mentioned in content.]
+
+**USAGE RULES FOR STORIES:**
+- Use stories to OPEN posts (hook) or to ILLUSTRATE a teaching point (not as filler)
+- Never use the same story twice in a week across platforms
+- Keep the client's original framing and energy — don't sanitize their storytelling
+- If a story has specific numbers or results, only use those numbers if they were stated by the client (not inferred)
+- Stories from client knowledge base entries tagged as "stories" are REAL and verified
+
+---
+
 ## LAYER 6: COMPLIANCE & GUARDRAILS
 
 ### CC-WIDE RED LINES (non-negotiable for ALL clients)
@@ -305,6 +345,7 @@ These are REAL learnings from working with the client. They OVERRIDE assumptions
 - **Content insights** → inform what works/doesn't in Content Formula
 - **SOPs** → become mandatory rules in Compliance
 - **Interaction summaries** → inform voice nuances and preferences
+- **Stories** → these are pre-extracted stories, anecdotes, origin stories, and client case studies mined from ALL transcripts. This is the PRIMARY source for the Story Arsenal (Layer 5B). Include every story with enough detail to retell it authentically. Tag each story by topic/pillar. These stories are what make content human and impossible for competitors to copy.
 
 ### DNA PROFILE (supplemental):
 Machine-generated brand analysis. Use to FILL GAPS not covered by transcripts. Never let DNA override direct transcript evidence. Useful for:

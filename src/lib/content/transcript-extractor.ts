@@ -22,7 +22,7 @@ export interface TranscriptExtraction {
   /** Word count of the extraction */
   word_count: number
   /** What was extracted */
-  extraction_type: 'voice' | 'strategy' | 'post_generation'
+  extraction_type: 'voice' | 'strategy' | 'post_generation' | 'stories'
   /** Original transcript word count */
   original_word_count: number
   /** Compression ratio */
@@ -171,6 +171,67 @@ Extract 5-10 insights, ranked from most compelling to least.
 - Rank insights by social media shareability (hook potential, relatability, surprise factor)
 - Never invent or embellish
 - Focus on ideas that teach something specific and actionable`,
+
+  /**
+   * For story mining — extract personal history, client stories, anecdotes, and experiences.
+   * Used by: generate-prompt route (feeds into Story Arsenal layer of system prompt)
+   */
+  stories: `You are a story archaeologist. Your job is to mine this transcript for every story, anecdote, personal experience, client case study, origin story, and memorable moment that the speaker shares.
+
+Stories are the most valuable content asset. They make content human, relatable, and impossible to replicate. Generic AI can write insights — but it can't invent stories that actually happened.
+
+## EXTRACT THESE:
+
+### ORIGIN STORY / PERSONAL HISTORY
+- How they got started in their field
+- Key turning points in their career or life
+- Failures, setbacks, or pivots that shaped them
+- "Before/after" moments (where they were vs where they are now)
+- Why they do what they do (motivation, mission, purpose)
+- Include their EXACT words when they tell these stories
+
+### CLIENT / CUSTOMER STORIES
+For each story, extract:
+- **Setup:** Who was the client? What was their situation? (use the speaker's words)
+- **Problem:** What were they struggling with?
+- **Turning point:** What changed? What did the speaker/their company do?
+- **Result:** What happened? (specific outcomes if mentioned)
+- **Quote:** The speaker's exact words telling this story
+- **Lesson:** What takeaway does the speaker draw from this story?
+
+### ANECDOTES & EXAMPLES
+- Short illustrative stories used to make a point
+- Real-world examples from their experience (not hypotheticals)
+- "I remember when..." or "We had a client who..." moments
+- Industry-specific war stories
+- Include the context: what point were they making when they told this story?
+
+### LESSONS LEARNED THE HARD WAY
+- Mistakes they made and what they learned
+- Things they wish they'd known earlier
+- Expensive lessons (time, money, reputation)
+- "If I could go back..." or "The biggest mistake I see is..." moments
+
+### RECURRING THEMES & BELIEFS
+- Core beliefs that come up repeatedly across stories
+- Principles they live/work by (with the story that illustrates each one)
+- What they're passionate about (detectable by energy/emphasis in their speech)
+- Contrarian views shaped by personal experience
+
+### PEOPLE & RELATIONSHIPS
+- Mentors, partners, team members they reference by name
+- Key relationships that shaped their business/career
+- How they talk about their team, clients, or industry peers
+
+## RULES:
+- DIRECT QUOTES are essential. The speaker's exact words make stories authentic.
+- For each story, include enough context that someone who wasn't there could retell it
+- Capture the EMOTIONAL arc, not just the facts (was it funny? painful? surprising?)
+- If the speaker tells the same story multiple times with different details, combine them
+- Note which stories seem to be their "greatest hits" (told with practiced delivery)
+- If this is a meeting/interview, focus on the CLIENT's stories, not the interviewer's
+- Never invent details. If the story is incomplete, note what's missing
+- Even small anecdotes matter — "I was talking to a client last week who..." is gold`,
 }
 
 /**
@@ -185,7 +246,7 @@ Extract 5-10 insights, ranked from most compelling to least.
 export async function extractTranscriptSignal(
   transcript: string,
   title: string,
-  purpose: 'strategy' | 'voice' | 'post_generation',
+  purpose: 'strategy' | 'voice' | 'post_generation' | 'stories',
   apiKey: string,
 ): Promise<TranscriptExtraction | null> {
   if (!transcript || transcript.trim().length < 100) {
@@ -238,7 +299,7 @@ export async function extractTranscriptSignal(
  */
 export async function extractMultipleTranscripts(
   transcripts: { title: string; text: string }[],
-  purpose: 'strategy' | 'voice' | 'post_generation',
+  purpose: 'strategy' | 'voice' | 'post_generation' | 'stories',
   apiKey: string,
   fallbackCharLimit: number = 8000,
 ): Promise<{ title: string; text: string; extracted: boolean }[]> {
