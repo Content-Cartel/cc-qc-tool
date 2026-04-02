@@ -9,15 +9,20 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
 )
 
+interface DeepgramWord {
+  word: string
+  start: number
+  end: number
+  confidence: number
+  punctuated_word?: string
+}
+
 /**
  * POST /api/spelling-check
  *
- * Analyzes a submission's transcript against the client's DNA to flag
- * potential on-screen spelling issues (names, company names, titles, etc.)
- *
- * Works by cross-referencing the transcript with known correct spellings
- * from the client DNA, then flagging words/phrases that could be misspelled
- * when displayed as lower thirds, titles, or captions.
+ * Uses Deepgram's word-level timestamps from the transcript to identify
+ * proper nouns, names, and brand terms with their EXACT timestamps.
+ * Then checks against client DNA for potential spelling risks.
  *
  * Body: { submission_id: string }
  */
@@ -34,10 +39,10 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Anthropic API key not configured' }, { status: 500 })
     }
 
-    // Get submission + transcript + client info
+    // Get submission with transcript + metadata (contains Deepgram word timestamps)
     const { data: submission, error: fetchErr } = await supabase
       .from('qc_submissions')
-      .select('id, external_url, title, client_id, transcript, clients(name)')
+      .select('id, title, client_id, transcript, metadata, clients(name)')
       .eq('id', submission_id)
       .single()
 
@@ -45,32 +50,48 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Submission not found' }, { status: 404 })
     }
 
-    // Need either a transcript or client transcripts to analyze
-    let transcriptText = submission.transcript
-
-    // If no submission transcript, try to find client transcripts for this video
-    if (!transcriptText) {
-      const { data: clientTranscripts } = await supabase
-        .from('client_transcripts')
-        .select('transcript_text')
-        .eq('client_id', submission.client_id)
-        .order('recorded_at', { ascending: false })
-        .limit(1)
-
-      if (clientTranscripts?.[0]?.transcript_text) {
-        transcriptText = clientTranscripts[0].transcript_text
-      }
-    }
-
-    if (!transcriptText) {
+    if (!submission.transcript) {
       return NextResponse.json(
-        { error: 'No transcript available for this submission. Transcribe the video first, then run the spelling check.' },
+        { error: 'No transcript available. Generate the transcript first, then run spelling check.' },
         { status: 400 }
       )
     }
 
     const clients = submission.clients as unknown as { name: string }[] | { name: string } | null
     const clientName = Array.isArray(clients) ? clients[0]?.name : clients?.name || 'Unknown Client'
+
+    // Get Deepgram word timestamps from metadata
+    const meta = submission.metadata as Record<string, unknown> | null
+    const dgWords = (meta?.deepgram_words || []) as DeepgramWord[]
+
+    // Build a timestamped transcript — each line shows the time + words
+    // This gives Claude exact timestamps to reference
+    let timestampedTranscript = ''
+    if (dgWords.length > 0) {
+      // Group words into ~10-second chunks with timestamps
+      let currentChunkStart = 0
+      let currentWords: string[] = []
+
+      for (const w of dgWords) {
+        if (w.start - currentChunkStart >= 10 && currentWords.length > 0) {
+          const mm = Math.floor(currentChunkStart / 60)
+          const ss = Math.floor(currentChunkStart % 60)
+          timestampedTranscript += `[${mm}:${String(ss).padStart(2, '0')}] ${currentWords.join(' ')}\n`
+          currentChunkStart = w.start
+          currentWords = []
+        }
+        currentWords.push(w.punctuated_word || w.word)
+      }
+      // Last chunk
+      if (currentWords.length > 0) {
+        const mm = Math.floor(currentChunkStart / 60)
+        const ss = Math.floor(currentChunkStart % 60)
+        timestampedTranscript += `[${mm}:${String(ss).padStart(2, '0')}] ${currentWords.join(' ')}\n`
+      }
+    } else {
+      // Fallback: use plain transcript without timestamps
+      timestampedTranscript = submission.transcript.slice(0, 8000)
+    }
 
     // Get client DNA for correct spelling reference
     const { data: dna } = await supabase
@@ -83,11 +104,10 @@ export async function POST(req: NextRequest) {
 
     let dnaExcerpt = ''
     if (dna?.dna_markdown) {
-      // Pull first 3000 chars of DNA (covers names, company, key people, brand terms)
       dnaExcerpt = dna.dna_markdown.slice(0, 3000)
     }
 
-    // Use Claude to analyze transcript for potential on-screen spelling issues
+    // Use Claude to find spelling risks with exact timestamps
     const anthropic = new Anthropic({ apiKey: anthropicKey })
 
     const response = await anthropic.messages.create({
@@ -96,46 +116,42 @@ export async function POST(req: NextRequest) {
       messages: [
         {
           role: 'user',
-          content: `You are a QC spelling checker for video production at Content Cartel. Your job is to identify words and phrases in a video transcript that are likely to appear as ON-SCREEN TEXT (lower thirds, name plates, titles, captions, URLs) and might be misspelled by editors.
+          content: `You are a QC spelling checker for video production. Your job is to identify words in a timestamped transcript that will likely appear as ON-SCREEN TEXT (lower thirds, name plates, titles, captions) and could be misspelled by editors.
 
-CLIENT INFORMATION (correct spellings):
-Client name: ${clientName}
+CLIENT INFORMATION (these are the CORRECT spellings):
+Client: ${clientName}
 ${dnaExcerpt}
 
 VIDEO TITLE: ${submission.title || 'Untitled'}
 
-TRANSCRIPT:
-${transcriptText.slice(0, 8000)}
+TIMESTAMPED TRANSCRIPT (each line has [MM:SS] timestamp):
+${timestampedTranscript.slice(0, 10000)}
 
 TASK:
-1. Identify all proper nouns, names, company names, titles, URLs, technical terms, and brand-specific words in the transcript
-2. For each one, flag it as a potential on-screen spelling risk — these are words editors will type into lower thirds, title cards, or captions
-3. Provide the CORRECT spelling based on the client DNA and context
-4. Estimate roughly where in the video this text might appear (early/middle/late, as approximate seconds)
+Find every proper noun, name, company name, title, URL, or technical term that an editor would need to type on screen. For each one, provide the EXACT timestamp from the transcript where it's spoken.
 
 Focus on:
-- Person names mentioned (speakers, guests, the client themselves)
-- Company/brand names
-- Product or service names
-- Technical terms specific to the client's industry
-- URLs or social handles mentioned
-- Titles or credentials (CEO, PhD, etc.)
+- Person names (speakers, guests, the client) — editors type these into lower thirds
+- Company/brand names — appear in title cards and lower thirds
+- Product/service names — appear in captions and graphics
+- Credentials and titles (CEO, PhD, CPA, etc.) — appear in lower thirds
+- URLs and social handles — appear as overlays
+- Industry-specific terms that are easy to misspell
 
 DO NOT flag:
 - Common English words
-- Generic phrases unlikely to appear on screen
-- Words that are obviously correct
+- Words that are obviously simple to spell
+- Generic phrases
 
-Return a JSON array. Each item:
-- "detected_text": the word/phrase as heard in transcript
-- "correct_spelling": the verified correct spelling from DNA/context
-- "issue": why this might be misspelled (e.g., "commonly misspelled name", "unusual company spelling")
-- "timestamp_estimate": approximate seconds into the video (0 for beginning, estimate based on position in transcript)
-- "confidence": 0.0-1.0 (1.0 = very likely to be misspelled by editors, 0.5 = moderate risk)
-- "on_screen_type": what kind of on-screen element this would appear in ("lower_third", "title_card", "caption", "url_overlay")
+Return a JSON array. Each item MUST have:
+- "word": the exact word/phrase from the transcript
+- "correct_spelling": the verified correct spelling from the DNA/context
+- "timestamp_seconds": the EXACT timestamp in seconds from the transcript (convert MM:SS to seconds)
+- "issue": brief description of why this is a risk (e.g., "unusual spelling", "commonly misspelled name")
+- "type": "lower_third" | "title_card" | "caption" | "url_overlay"
+- "confidence": 0.0-1.0 (how likely an editor would misspell this)
 
-If no risks found, return empty array: []
-Return ONLY valid JSON, no other text.`,
+Return ONLY valid JSON array, no other text. If no risks, return [].`,
         },
       ],
     })
@@ -147,12 +163,12 @@ Return ONLY valid JSON, no other text.`,
 
     // Parse response
     let issues: Array<{
-      detected_text: string
+      word: string
       correct_spelling: string
+      timestamp_seconds: number
       issue: string
-      timestamp_estimate: number
+      type: string
       confidence: number
-      on_screen_type: string
     }> = []
 
     try {
@@ -161,30 +177,47 @@ Return ONLY valid JSON, no other text.`,
       if (jsonMatch) jsonStr = jsonMatch[1].trim()
       issues = JSON.parse(jsonStr)
     } catch {
-      console.error('[spelling-check] Failed to parse response:', content.text.slice(0, 200))
+      console.error('[spelling-check] Failed to parse:', content.text.slice(0, 200))
       return NextResponse.json({ error: 'Failed to parse spelling analysis' }, { status: 500 })
     }
 
-    // Filter to only meaningful issues (confidence > 0.3)
+    // Filter low confidence
     issues = issues.filter(i => i.confidence > 0.3)
 
+    // If we have Deepgram words, snap each issue to the nearest exact word timestamp
+    if (dgWords.length > 0) {
+      for (const issue of issues) {
+        const target = issue.word.toLowerCase()
+        // Find the Deepgram word that best matches
+        const match = dgWords.find(w =>
+          w.word.toLowerCase() === target ||
+          (w.punctuated_word || '').toLowerCase() === target ||
+          w.word.toLowerCase().includes(target) ||
+          target.includes(w.word.toLowerCase())
+        )
+        if (match) {
+          issue.timestamp_seconds = match.start
+        }
+      }
+    }
+
     // Save results to database
+    // Clear previous results first
+    await supabase
+      .from('spelling_check_results')
+      .delete()
+      .eq('submission_id', submission_id)
+
     if (issues.length > 0) {
       const rows = issues.map(issue => ({
         submission_id,
-        frame_timestamp_seconds: issue.timestamp_estimate || 0,
-        detected_text: issue.detected_text,
-        issue_description: `${issue.issue} (${issue.on_screen_type})`,
+        frame_timestamp_seconds: issue.timestamp_seconds || 0,
+        detected_text: issue.word,
+        issue_description: `${issue.issue} (${issue.type})`,
         suggested_fix: issue.correct_spelling,
         confidence: Math.max(0, Math.min(1, issue.confidence)),
         status: 'flagged',
       }))
-
-      // Clear previous results for this submission before inserting new ones
-      await supabase
-        .from('spelling_check_results')
-        .delete()
-        .eq('submission_id', submission_id)
 
       await supabase.from('spelling_check_results').insert(rows)
     }
@@ -192,13 +225,14 @@ Return ONLY valid JSON, no other text.`,
     return NextResponse.json({
       success: true,
       issues: issues.map(i => ({
-        frame_timestamp_seconds: i.timestamp_estimate || 0,
-        detected_text: i.detected_text,
-        issue_description: `${i.issue} (${i.on_screen_type})`,
+        frame_timestamp_seconds: i.timestamp_seconds || 0,
+        detected_text: i.word,
+        issue_description: `${i.issue} (${i.type})`,
         suggested_fix: i.correct_spelling,
         confidence: i.confidence,
       })),
       total_risks: issues.length,
+      has_timestamps: dgWords.length > 0,
     })
   } catch (err) {
     console.error('[spelling-check] Error:', err)

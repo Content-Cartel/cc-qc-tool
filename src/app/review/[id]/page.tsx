@@ -1648,18 +1648,18 @@ export default function ReviewPage() {
                         >
                           <div className="flex items-start justify-between gap-2">
                             <div className="flex-1">
-                              <div className="flex items-center gap-2 mb-1">
-                                <span className="font-mono text-[10px] px-1.5 py-0.5 rounded" style={{ background: 'var(--surface-2)', color: 'var(--text-2)' }}>
-                                  {Math.floor(result.frame_timestamp_seconds / 60)}:{String(Math.floor(result.frame_timestamp_seconds % 60)).padStart(2, '0')}
+                              <div className="flex items-center gap-2 mb-1.5">
+                                <span className="font-mono text-[11px] font-semibold px-2 py-0.5 rounded flex items-center gap-1" style={{ background: 'var(--surface-2)', color: 'var(--gold)', border: '1px solid var(--gold)', opacity: 0.9 }}>
+                                  ▶ {Math.floor(result.frame_timestamp_seconds / 60)}:{String(Math.floor(result.frame_timestamp_seconds % 60)).padStart(2, '0')}
                                 </span>
                                 <span className="font-medium" style={{ color: 'var(--text)' }}>
                                   &quot;{result.detected_text}&quot;
                                 </span>
                               </div>
                               <p style={{ color: 'var(--text-2)' }}>{result.issue_description}</p>
-                              <p className="mt-0.5">
-                                <span style={{ color: 'var(--text-3)' }}>Suggestion: </span>
-                                <span className="font-medium" style={{ color: 'var(--green)' }}>{result.suggested_fix}</span>
+                              <p className="mt-1">
+                                <span style={{ color: 'var(--text-3)' }}>Correct: </span>
+                                <span className="font-semibold" style={{ color: 'var(--green)' }}>{result.suggested_fix}</span>
                               </p>
                             </div>
                             {result.status === 'flagged' && (
