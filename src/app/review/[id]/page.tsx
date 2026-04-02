@@ -457,12 +457,16 @@ export default function ReviewPage() {
     })
 
     // Auto-advance pipeline stage based on status change
-    const stageMap: Record<string, Record<string, string>> = {
-      approved: { qc_review: 'package' },
+    // Approved always moves to package regardless of current stage
+    const stageMap: Record<string, string | Record<string, string>> = {
+      approved: 'package',
       revision_requested: { qc_review: 'editor_polish' },
       resubmitted: { editor_polish: 'qc_review' },
     }
-    const nextStage = stageMap[newStatus]?.[submission.current_pipeline_stage]
+    const mapping = stageMap[newStatus]
+    const nextStage = typeof mapping === 'string'
+      ? mapping
+      : mapping?.[submission.current_pipeline_stage]
     if (nextStage) {
       await supabase
         .from('qc_submissions')
@@ -495,19 +499,15 @@ export default function ReviewPage() {
     await loadSubmission()
   }
 
-  async function handleGenerateTranscript(ytUrl?: string) {
+  async function handleGenerateTranscript() {
     if (!submission) return
     setTranscribing(true)
     setTranscriptError(null)
     try {
-      const body: Record<string, string> = { submission_id: submissionId }
-      if (ytUrl || youtubeUrlInput.trim()) {
-        body.youtube_url = ytUrl || youtubeUrlInput.trim()
-      }
       const res = await fetch('/api/transcribe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
+        body: JSON.stringify({ submission_id: submissionId }),
       })
       const data = await res.json()
       if (!res.ok) {
@@ -1068,56 +1068,18 @@ export default function ReviewPage() {
                             </div>
                           </div>
                         ) : (
-                          <div className="flex flex-col items-center gap-3">
+                          <div className="flex flex-col items-center gap-2">
                             <p className="text-xs" style={{ color: 'var(--text-3)' }}>
                               No transcript yet
                             </p>
-                            {showYoutubeInput ? (
-                              <div className="flex flex-col items-center gap-2 w-full max-w-md">
-                                <input
-                                  type="text"
-                                  placeholder="Paste YouTube URL..."
-                                  value={youtubeUrlInput}
-                                  onChange={(e) => setYoutubeUrlInput(e.target.value)}
-                                  className="w-full px-3 py-1.5 rounded-lg text-xs"
-                                  style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text)' }}
-                                />
-                                <div className="flex gap-2">
-                                  <button
-                                    onClick={() => handleGenerateTranscript()}
-                                    disabled={!youtubeUrlInput.trim()}
-                                    className="btn-primary text-xs flex items-center gap-1.5"
-                                  >
-                                    <Youtube size={12} />
-                                    Pull Transcript
-                                  </button>
-                                  <button
-                                    onClick={() => { setShowYoutubeInput(false); setYoutubeUrlInput('') }}
-                                    className="btn-secondary text-xs"
-                                  >
-                                    Cancel
-                                  </button>
-                                </div>
-                              </div>
-                            ) : (
-                              <div className="flex gap-2">
-                                <button
-                                  onClick={() => setShowYoutubeInput(true)}
-                                  className="btn-primary text-xs flex items-center gap-1.5"
-                                >
-                                  <Youtube size={12} />
-                                  From YouTube
-                                </button>
-                                {submission.external_url && (
-                                  <button
-                                    onClick={() => handleGenerateTranscript()}
-                                    className="btn-secondary text-xs flex items-center gap-1.5"
-                                  >
-                                    <FileText size={12} />
-                                    From Drive
-                                  </button>
-                                )}
-                              </div>
+                            {submission.external_url && (
+                              <button
+                                onClick={() => handleGenerateTranscript()}
+                                className="btn-primary text-xs flex items-center gap-1.5"
+                              >
+                                <Mic size={12} />
+                                Generate Transcript
+                              </button>
                             )}
                           </div>
                         )}
