@@ -10,6 +10,7 @@ import { PipelineStageLabel } from '@/components/pipeline-tracker'
 import { createClient } from '@/lib/supabase/client'
 import { useAuth } from '@/hooks/use-auth'
 import { timeAgo } from '@/lib/utils/date'
+import type { PipelineStageKey } from '@/lib/constants'
 import type { QCSubmission } from '@/lib/supabase/types'
 
 export default function MySubmissionsPage() {
@@ -107,7 +108,7 @@ export default function MySubmissionsPage() {
                           <StatusBadge status={s.status} />
                           <ContentTypeBadge type={s.content_type} />
                           {s.current_pipeline_stage && (
-                            <PipelineStageLabel stage={s.current_pipeline_stage} />
+                            <PipelineStageLabel stage={s.current_pipeline_stage as PipelineStageKey} />
                           )}
                         </div>
                       </div>
