@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import React, { useState, useEffect, useCallback } from 'react'
 import { useRouter, useParams } from 'next/navigation'
 import { motion } from 'framer-motion'
 import { ArrowLeft, ExternalLink, User, Calendar, Hash, RefreshCw, Trash2, Pencil, X, ChevronDown, FileText, Copy, Loader2, AlertCircle, History, Eye, EyeOff, Search, ChevronRight, Mic, Youtube, MessageSquare, Sparkles, Check, ScanEye, XCircle, CheckCircle2 } from 'lucide-react'
@@ -52,6 +52,7 @@ interface SubmissionDetail {
   qc_score: number | null
   transcript: string | null
   transcript_status: TranscriptStatus | null
+  metadata: Record<string, unknown> | null
   created_at: string
   clients?: { name: string } | null
 }
@@ -497,6 +498,23 @@ export default function ReviewPage() {
     await loadSubmission()
   }
 
+  const transcriptPollRef = React.useRef<ReturnType<typeof setInterval> | null>(null)
+
+  // Stop polling when transcript status changes
+  useEffect(() => {
+    if (submission?.transcript_status === 'completed' || submission?.transcript_status === 'failed') {
+      if (transcriptPollRef.current) {
+        clearInterval(transcriptPollRef.current)
+        transcriptPollRef.current = null
+      }
+      setTranscribing(false)
+      if (submission.transcript_status === 'failed') {
+        const meta = submission.metadata as Record<string, unknown> | null
+        setTranscriptError((meta?.error as string) || 'Transcription failed')
+      }
+    }
+  }, [submission?.transcript_status])
+
   async function handleGenerateTranscript() {
     if (!submission) return
     setTranscribing(true)
@@ -509,12 +527,26 @@ export default function ReviewPage() {
       })
       const data = await res.json()
       if (!res.ok) {
-        setTranscriptError(data.error || 'Transcription failed')
+        setTranscriptError(data.error || 'Failed to start transcription')
+        setTranscribing(false)
+        return
       }
-      await loadSubmission()
+
+      // Poll for completion every 3 seconds
+      const startTime = Date.now()
+      const maxWait = 10 * 60 * 1000 // 10 minutes
+      transcriptPollRef.current = setInterval(async () => {
+        if (Date.now() - startTime > maxWait) {
+          if (transcriptPollRef.current) clearInterval(transcriptPollRef.current)
+          transcriptPollRef.current = null
+          setTranscriptError('Transcription is taking longer than expected — check back in a few minutes')
+          setTranscribing(false)
+          return
+        }
+        await loadSubmission()
+      }, 3000)
     } catch {
       setTranscriptError('Network error — try again')
-    } finally {
       setTranscribing(false)
     }
   }
@@ -1044,7 +1076,7 @@ export default function ReviewPage() {
                           <div className="flex flex-col items-center gap-2">
                             <Loader2 size={20} className="animate-spin" style={{ color: 'var(--gold)' }} />
                             <p className="text-xs" style={{ color: 'var(--text-3)' }}>
-                              Pulling transcript...
+                              Transcribing video — this may take a few minutes...
                             </p>
                           </div>
                         ) : transcriptError || submission.transcript_status === 'failed' ? (
