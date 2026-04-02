@@ -428,6 +428,8 @@ function aggregateVideoData(videos: YouTubeVideoData[]) {
 
 /**
  * Format all YouTube data into a structured markdown section for the DNA prompt.
+ * Structure: Insights FIRST (what works, what doesn't), then top performers with detail,
+ * then remaining videos as titles-only. The AI needs patterns, not raw data dumps.
  */
 export function formatYouTubeAPIData(
   channel: YouTubeChannelData,
@@ -437,7 +439,63 @@ export function formatYouTubeAPIData(
   const agg = aggregateVideoData(videos)
   const sections: string[] = []
 
-  // Channel overview
+  // ============================================================
+  // SECTION 1: WHAT WORKS vs WHAT DOESN'T (Most important — goes first)
+  // ============================================================
+  if (videos.length >= 5) {
+    const cadenceStr = agg.avgDaysBetween > 0
+      ? agg.avgDaysBetween <= 2 ? 'Daily'
+        : agg.avgDaysBetween <= 4 ? `Every ~${agg.avgDaysBetween} days`
+        : agg.avgDaysBetween <= 8 ? 'Weekly'
+        : agg.avgDaysBetween <= 16 ? 'Bi-weekly'
+        : `Every ~${agg.avgDaysBetween} days`
+      : 'Unknown'
+
+    // Analyze what top performers have in common
+    const topAvgDuration = agg.topPerformers.length > 0
+      ? Math.round(agg.topPerformers.reduce((s, v) => s + parseDurationSeconds(v.duration), 0) / agg.topPerformers.length / 60)
+      : 0
+    const bottomAvgDuration = agg.underperformers.length > 0
+      ? Math.round(agg.underperformers.reduce((s, v) => s + parseDurationSeconds(v.duration), 0) / agg.underperformers.length / 60)
+      : 0
+
+    // Top performer tags vs underperformer tags
+    const topTagSet = new Map<string, number>()
+    for (const v of agg.topPerformers) {
+      for (const tag of v.tags) topTagSet.set(tag.toLowerCase(), (topTagSet.get(tag.toLowerCase()) || 0) + 1)
+    }
+    const topUniqueThemes = Array.from(topTagSet.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([tag]) => tag)
+
+    sections.push(`### CONTENT INTELLIGENCE — What Works vs What Doesn't
+**Based on analysis of ${agg.totalVideosAnalyzed} videos.**
+
+**Channel Benchmarks:**
+- Avg views: ${formatCount(agg.avgViews)} | Avg likes: ${formatCount(agg.avgLikes)} | Avg comments: ${formatCount(agg.avgComments)}
+- Engagement rate: ${agg.avgEngagementRate.toFixed(1)}%
+- Upload cadence: ${cadenceStr} (avg ${agg.avgDaysBetween} days between uploads)
+
+**WHAT WORKS (Top 20% by views):**
+${agg.topPerformers.map(v => `- "${v.title}" — ${formatCount(v.viewCount)} views (${(v.viewCount / Math.max(agg.avgViews, 1)).toFixed(1)}x channel avg)`).join('\n')}
+${topAvgDuration > 0 ? `- Top performers average ~${topAvgDuration} minutes` : ''}
+${topUniqueThemes.length > 0 ? `- Common themes in top content: ${topUniqueThemes.join(', ')}` : ''}
+
+**WHAT DOESN'T WORK (Bottom 20% by views):**
+${videos.length >= 10 ? agg.underperformers.map(v => `- "${v.title}" — ${formatCount(v.viewCount)} views (${(v.viewCount / Math.max(agg.avgViews, 1)).toFixed(1)}x channel avg)`).join('\n') : '[Not enough videos to determine underperformers]'}
+${bottomAvgDuration > 0 && videos.length >= 10 ? `- Underperformers average ~${bottomAvgDuration} minutes` : ''}
+
+**CONTENT PATTERNS:**
+${agg.topTags.length > 0 ? `- Most used tags across all videos: ${agg.topTags.slice(0, 15).join(', ')}` : ''}
+${agg.commonCTAs.length > 0 ? `- Common CTAs: ${agg.commonCTAs.join(', ')}` : ''}
+${agg.commonHashtags.length > 0 ? `- Common hashtags: ${agg.commonHashtags.join(', ')}` : ''}
+${agg.postingSchedule.length > 0 ? `- Most active upload days: ${agg.postingSchedule.slice(0, 3).map(d => `${d.dayOfWeek} (${d.count})`).join(', ')}` : ''}`)
+  }
+
+  // ============================================================
+  // SECTION 2: Channel Overview + Content Pillars (Context)
+  // ============================================================
   sections.push(`### Channel Overview
 - **Name:** ${channel.name}
 - **Subscribers:** ${formatCount(channel.subscriberCount)}
@@ -448,86 +506,63 @@ export function formatYouTubeAPIData(
 ${channel.description ? `\n**Channel Description:**\n${channel.description.slice(0, 1500)}` : ''}
 ${channel.keywords.length > 0 ? `\n**Channel Keywords:** ${channel.keywords.join(', ')}` : ''}`)
 
-  // Playlists (content pillars)
   if (playlists.length > 0) {
     sections.push(`### Playlists (Content Pillars)
 ${playlists.map(p => `- **${p.title}** (${p.videoCount} videos)${p.description ? ` — ${p.description}` : ''}`).join('\n')}`)
   }
 
-  // Recent videos with full data
-  if (videos.length > 0) {
-    const videoLines = videos.slice(0, 50).map((v, i) => {
-      const date = v.publishedAt ? new Date(v.publishedAt).toLocaleDateString() : ''
-      const engagement = v.viewCount > 0 ? ((v.likeCount / v.viewCount) * 100).toFixed(1) : '0'
-      return `**${i + 1}. ${v.title}**
-   Views: ${formatCount(v.viewCount)} | Likes: ${formatCount(v.likeCount)} | Comments: ${formatCount(v.commentCount)} | Duration: ${formatDuration(v.duration)} | Published: ${date} | Engagement: ${engagement}%
-   ${v.tags.length > 0 ? `Tags: ${v.tags.slice(0, 10).join(', ')}` : ''}
-   ${v.description ? `Description excerpt: ${v.description.slice(0, 300)}...` : ''}`
-    })
-
-    sections.push(`### Recent Videos (${videos.length} analyzed)
-${videoLines.join('\n\n')}`)
-  }
-
-  // Top performers (by views) with deeper analysis
+  // ============================================================
+  // SECTION 3: Top 10 Videos — Full Detail (for voice mining + hook patterns)
+  // ============================================================
   if (agg.topPerformers.length > 0) {
-    sections.push(`### Top Performing Videos (Top 20%)
-These videos significantly outperform the channel average of ${formatCount(agg.avgViews)} views.
-${agg.topPerformers.map((v, i) => `**${i + 1}. ${v.title}** — ${formatCount(v.viewCount)} views (${(v.viewCount / Math.max(agg.avgViews, 1) * 100).toFixed(0)}% of avg), ${formatCount(v.likeCount)} likes
-   Duration: ${formatDuration(v.duration)}
-   ${v.tags.length > 0 ? `Tags: ${v.tags.slice(0, 8).join(', ')}` : ''}
-   ${v.description ? `Description: ${v.description.slice(0, 400)}...` : ''}`).join('\n\n')}`)
+    const topVideos = agg.topPerformers.slice(0, 10)
+    sections.push(`### Top 10 Videos — Full Detail (mine these for voice, hooks, and content patterns)
+${topVideos.map((v, i) => {
+      const date = v.publishedAt ? new Date(v.publishedAt).toLocaleDateString() : ''
+      return `**${i + 1}. ${v.title}**
+   Views: ${formatCount(v.viewCount)} | Likes: ${formatCount(v.likeCount)} | Comments: ${formatCount(v.commentCount)} | Duration: ${formatDuration(v.duration)} | Published: ${date}
+   ${v.tags.length > 0 ? `Tags: ${v.tags.slice(0, 10).join(', ')}` : ''}
+   ${v.description ? `Description: ${v.description.slice(0, 500)}` : ''}`
+    }).join('\n\n')}`)
   }
 
-  // Underperformers
-  if (agg.underperformers.length > 0 && videos.length >= 10) {
-    sections.push(`### Underperforming Videos (Bottom 20%)
-These videos underperform the channel average.
-${agg.underperformers.map((v, i) => `${i + 1}. ${v.title} — ${formatCount(v.viewCount)} views (${(v.viewCount / Math.max(agg.avgViews, 1) * 100).toFixed(0)}% of avg)`).join('\n')}`)
+  // ============================================================
+  // SECTION 4: Remaining Videos — Titles Only (for topic coverage)
+  // ============================================================
+  const topPerformerIds = new Set(agg.topPerformers.slice(0, 10).map(v => v.videoId))
+  const remainingVideos = videos.filter(v => !topPerformerIds.has(v.videoId))
+  if (remainingVideos.length > 0) {
+    sections.push(`### Additional Videos — Titles (${remainingVideos.length} videos, for topic coverage analysis)
+${remainingVideos.map((v, i) => {
+      const views = formatCount(v.viewCount)
+      return `${i + 1}. ${v.title} (${views} views, ${formatDuration(v.duration)})`
+    }).join('\n')}`)
   }
 
-  // Aggregated insights
-  const cadenceStr = agg.avgDaysBetween > 0
-    ? agg.avgDaysBetween <= 2 ? 'Daily'
-      : agg.avgDaysBetween <= 4 ? `Every ~${agg.avgDaysBetween} days`
-      : agg.avgDaysBetween <= 8 ? 'Weekly'
-      : agg.avgDaysBetween <= 16 ? 'Bi-weekly'
-      : `Every ~${agg.avgDaysBetween} days`
-    : 'Unknown'
-
-  sections.push(`### Content Insights (Aggregated from ${agg.totalVideosAnalyzed} videos)
-- **Average Views per Video:** ${formatCount(agg.avgViews)}
-- **Average Likes per Video:** ${formatCount(agg.avgLikes)}
-- **Average Comments per Video:** ${formatCount(agg.avgComments)}
-- **Average Engagement Rate:** ${agg.avgEngagementRate.toFixed(1)}%
-- **Upload Cadence:** ${cadenceStr} (avg ${agg.avgDaysBetween} days between uploads)
-${agg.topTags.length > 0 ? `- **Most Used Tags:** ${agg.topTags.join(', ')}` : ''}
-${agg.commonCTAs.length > 0 ? `- **Common CTAs in Descriptions:** ${agg.commonCTAs.join(', ')}` : ''}
-${agg.commonHashtags.length > 0 ? `- **Common Hashtags:** ${agg.commonHashtags.join(', ')}` : ''}`)
-
-  // Posting schedule
-  if (agg.postingSchedule.length > 0) {
-    sections.push(`### Posting Schedule
-Most common upload days:
-${agg.postingSchedule.map(d => `- **${d.dayOfWeek}:** ${d.count} videos`).join('\n')}`)
-  }
-
-  // Recurring links (funnel/CTAs)
-  if (agg.recurringLinks.length > 0) {
-    sections.push(`### Recurring Links in Descriptions (Funnel/CTAs)
-${agg.recurringLinks.map(l => `- ${l}`).join('\n')}`)
-  }
-
-  // Description template
-  if (agg.descriptionTemplate) {
-    sections.push(`### Description Template Pattern
-The following text appears in 60%+ of video descriptions (likely a template):
-\`\`\`
-${agg.descriptionTemplate.slice(0, 800)}
-\`\`\``)
+  // ============================================================
+  // SECTION 5: Funnel Signals (recurring links, description templates)
+  // ============================================================
+  if (agg.recurringLinks.length > 0 || agg.descriptionTemplate) {
+    let funnelSection = `### Funnel Signals`
+    if (agg.recurringLinks.length > 0) {
+      funnelSection += `\n**Recurring Links in Descriptions (where they send traffic):**\n${agg.recurringLinks.map(l => `- ${l}`).join('\n')}`
+    }
+    if (agg.descriptionTemplate) {
+      funnelSection += `\n\n**Description Template (appears in 60%+ of videos):**\n\`\`\`\n${agg.descriptionTemplate.slice(0, 800)}\n\`\`\``
+    }
+    sections.push(funnelSection)
   }
 
   return sections.join('\n\n')
+}
+
+/**
+ * Parse ISO 8601 duration (PT#H#M#S) to total seconds.
+ */
+function parseDurationSeconds(duration: string): number {
+  const match = duration.match(/PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/)
+  if (!match) return 0
+  return (parseInt(match[1] || '0') * 3600) + (parseInt(match[2] || '0') * 60) + parseInt(match[3] || '0')
 }
 
 /**

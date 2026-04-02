@@ -1,9 +1,11 @@
 import { NextRequest } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { createClient } from '@supabase/supabase-js'
-import { ccPostProcess } from '@/lib/content/cc-rules'
+import { ccPostProcess, CC_PLATFORM_DEFAULTS } from '@/lib/content/cc-rules'
+import { buildFallbackPrompt } from '@/lib/content/fallback-prompt'
+import { extractTranscriptSignal } from '@/lib/content/transcript-extractor'
 
-export const maxDuration = 120
+export const maxDuration = 180
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -18,11 +20,20 @@ interface GeneratePostsRequest {
 }
 
 /**
+ * Platform-specific max tokens. Tighter budgets = more focused output.
+ */
+const PLATFORM_MAX_TOKENS: Record<string, number> = {
+  linkedin: 1800,
+  twitter: 600,
+  facebook: 1200,
+}
+
+/**
  * POST /api/content/generate-posts
  *
  * Generates platform-specific written posts from a transcript + client DNA/prompt.
- * If a client has a custom system prompt in client_prompts table, uses that.
- * Otherwise falls back to generic DNA-based prompt.
+ * Each platform gets its own Claude call for focused, higher-quality output.
+ * If a client has a custom system prompt, uses that. Otherwise uses DNA-based fallback.
  * Returns streaming SSE with progress events and generated content.
  */
 export async function POST(req: NextRequest) {
@@ -74,33 +85,33 @@ export async function POST(req: NextRequest) {
     transcriptTitle = data.title
   }
 
-  // Fetch client DNA
-  const { data: dna } = await supabase
-    .from('client_dna')
-    .select('dna_markdown')
-    .eq('client_id', client_id)
-    .order('version', { ascending: false })
-    .limit(1)
-    .maybeSingle()
+  // Fetch client DNA + custom prompt + client name in parallel
+  const [dnaResult, clientPromptResult, clientResult] = await Promise.all([
+    supabase
+      .from('client_dna')
+      .select('dna_markdown')
+      .eq('client_id', client_id)
+      .order('version', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    supabase
+      .from('client_prompts')
+      .select('system_prompt')
+      .eq('client_id', client_id)
+      .eq('prompt_type', 'content_generation')
+      .order('version', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+    supabase
+      .from('clients')
+      .select('name')
+      .eq('id', client_id)
+      .single(),
+  ])
 
-  // Fetch client-specific system prompt (if exists)
-  const { data: clientPrompt } = await supabase
-    .from('client_prompts')
-    .select('system_prompt')
-    .eq('client_id', client_id)
-    .eq('prompt_type', 'content_generation')
-    .order('version', { ascending: false })
-    .limit(1)
-    .maybeSingle()
-
-  // Fetch client name
-  const { data: client } = await supabase
-    .from('clients')
-    .select('name')
-    .eq('id', client_id)
-    .single()
-
-  const clientName = client?.name || `Client ${client_id}`
+  const dna = dnaResult.data
+  const clientPrompt = clientPromptResult.data
+  const clientName = clientResult.data?.name || `Client ${client_id}`
   const hasCustomPrompt = !!clientPrompt?.system_prompt
 
   const encoder = new TextEncoder()
@@ -112,132 +123,133 @@ export async function POST(req: NextRequest) {
       }
 
       try {
+        const anthropic = new Anthropic({ apiKey: anthropicKey })
+
+        // Extract signal from transcript via Haiku (if transcript is long enough to benefit)
+        let processedTranscript: string
+        let wasExtracted = false
+
+        if (transcriptText.length > 15000) {
+          sendEvent('progress', {
+            stage: 'extracting',
+            message: `Extracting key insights from transcript via Haiku...`,
+          })
+
+          const extraction = await extractTranscriptSignal(
+            transcriptText,
+            transcriptTitle,
+            'post_generation',
+            anthropicKey,
+          )
+
+          if (extraction) {
+            processedTranscript = extraction.content
+            wasExtracted = true
+            sendEvent('progress', {
+              stage: 'extracting',
+              message: `Extracted: ${extraction.original_word_count} → ${extraction.word_count} words (${extraction.compression_ratio}x compression)`,
+            })
+          } else {
+            // Fallback to truncation
+            processedTranscript = transcriptText.slice(0, 15000)
+          }
+        } else {
+          // Short transcripts don't need extraction
+          processedTranscript = transcriptText
+        }
+
         sendEvent('progress', {
           stage: 'generating',
           message: hasCustomPrompt
-            ? `Generating posts using ${clientName}'s custom brand prompt...`
-            : `Generating posts from transcript + DNA...`,
+            ? `Generating ${platforms.length} post(s) using ${clientName}'s custom brand prompt...`
+            : `Generating ${platforms.length} post(s) from transcript + DNA...`,
         })
 
-        const platformInstructions = platforms.map(p => {
-          switch (p) {
-            case 'linkedin':
-              return `## LinkedIn Post
-- 1,500-2,500 characters (long-form educational post, NOT short fluff)
-- Open with a bold, counterintuitive hook (1-2 sentences max) that challenges conventional thinking
-- Then immediately teach: explain the core concept in plain language with concrete examples and specific numbers
-- Use short paragraphs (1-3 sentences each) separated by line breaks. NO bullet points, NO numbered lists
-- Build the argument paragraph by paragraph, each one adding a new layer or angle
-- Voice should be authoritative but accessible, like an expert explaining something to a smart peer
-- NO hashtags anywhere in the post
-- NO emojis anywhere in the post
-- NEVER use em dashes. Use commas, periods, colons, or semicolons instead
-- End with a CTA that offers something free and valuable (assessment, guide, resource) with a link
-- After the CTA link, add a "P.S." section that preemptively addresses a common objection
-- Total structure: Hook > Education/Insight (3-5 paragraphs) > CTA with link > P.S.`
-            case 'twitter':
-              return `## X (Twitter) Post
-- Maximum 280 characters for the main tweet
-- If the content needs more space, write a thread (3-5 tweets)
-- First tweet must be the strongest hook
-- Each tweet should stand alone but flow as a narrative
-- Punchy, direct language. No filler
-- NEVER use em dashes. Use commas, periods, or colons instead
-- 1-2 hashtags max
-- Tag relevant accounts if obvious from context`
-            case 'facebook':
-              return `## Facebook Post
-- Conversational and relatable tone
-- 100-250 words ideal
-- Tell a mini-story or share a lesson from the transcript
-- Can be more casual than LinkedIn
-- NEVER use em dashes. Use commas, periods, or colons instead
-- Include a question at the end to encourage comments
-- No hashtags (or 1-2 max)
-- Write like you're talking to a friend who's interested in the topic`
-            default:
-              return ''
+        // Generate each platform separately for focused, higher-quality output
+        const platformResults: Record<string, string> = {}
+
+        for (const platform of platforms) {
+          sendEvent('progress', {
+            stage: 'generating',
+            message: `Writing ${platform} post...`,
+          })
+
+          // Build system prompt per-platform
+          let systemPrompt: string
+          const platformRules = CC_PLATFORM_DEFAULTS[platform as keyof typeof CC_PLATFORM_DEFAULTS] || ''
+
+          if (hasCustomPrompt) {
+            systemPrompt = `${clientPrompt.system_prompt}
+
+## TASK: Generate a ${platform.toUpperCase()} post from the transcript below.
+
+Apply ALL your brand rules, compliance checks, and voice guidelines.
+
+${platformRules}
+
+CRITICAL REMINDERS:
+- NEVER use em dashes (—). Use commas, periods, colons, or semicolons.
+- NEVER use specific numbers unless DIRECTLY quoted from the transcript.
+- NEVER use hype phrases: "game-changer," "mind-blowing," "buckle up," "let that sink in," "here's the thing," "read that again," "this is huge."
+- NEVER use generic filler: "Let me know what you think!", "Drop a comment!", "Follow for more!"
+- Output the post ONLY. No commentary, no "here's the post," no meta-notes. Ready to copy-paste.`
+          } else {
+            // Use the structured fallback prompt that parses DNA
+            systemPrompt = buildFallbackPrompt(clientName, dna?.dna_markdown || null, platform as 'linkedin' | 'twitter' | 'facebook')
           }
-        }).join('\n\n')
 
-        // Build system prompt: custom client prompt takes priority over generic
-        let systemPrompt: string
-
-        if (hasCustomPrompt) {
-          // Client has a custom system prompt (e.g., Monetary Metals with compliance rules)
-          systemPrompt = `${clientPrompt.system_prompt}
-
-## ADDITIONAL CONTEXT FOR THIS GENERATION
-
-You are generating social media posts from a transcript. Apply ALL your brand rules, compliance checks, and voice guidelines to the output.
-
-CRITICAL FORMATTING RULE: NEVER use em dashes (the "—" character) in any output. Replace with commas, periods, colons, or semicolons. This is a non-negotiable Content Cartel rule.
-
-${platformInstructions}`
-        } else {
-          // Generic prompt using DNA
-          systemPrompt = `You are a content repurposing specialist for ${clientName}. Your job is to take video transcript content and turn it into platform-specific written posts.
-
-${dna?.dna_markdown ? `## Client Voice DNA
-Use this DNA profile to match the client's voice, tone, frameworks, and style:
-
-${dna.dna_markdown}` : `## Note
-No DNA profile is available for this client. Write in a professional, authentic tone. Focus on extracting the core insights from the transcript.`}
-
-## Rules
-1. Extract the BEST ideas, insights, stories, or frameworks from the transcript
-2. Each post should focus on ONE clear idea and go DEEP on it
-3. Write in the client's voice (if DNA is available), not generic marketing speak. Expert-to-peer tone, not salesy
-4. Use specific examples, numbers, and scenarios from the transcript. Concrete > abstract
-5. Never invent facts, statistics, or claims not in the transcript
-6. Each platform post should cover a DIFFERENT angle/idea from the transcript
-7. Output each post under its platform heading, ready to copy-paste. No commentary or meta-notes
-8. The CTA should reference the client's actual offer/link/resource. If none exists, use "[INSERT CTA LINK]"
-9. NO generic filler lines like "Let me know what you think!" or "Drop a comment below!"
-10. NEVER use em dashes (the "—" character). Use commas, periods, colons, or semicolons instead
-
-${platformInstructions}`
-        }
-
-        const userPrompt = `Here is the transcript from "${transcriptTitle}":
+          const userPrompt = `Transcript from "${transcriptTitle}"${wasExtracted ? ' (key insights extracted via AI)' : ''}:
 
 ---
-${transcriptText.slice(0, 15000)}
-${transcriptText.length > 15000 ? '\n[Transcript truncated for length. Focus on the content provided above]' : ''}
+${processedTranscript}
 ---
 
-Generate written posts for the following platforms: ${platforms.join(', ')}.
+Write ONE ${platform} post from this transcript. Pick the single most compelling, unique, or valuable idea and go DEEP on it.${
+  platforms.length > 1 ? `\n\nIMPORTANT: This post should cover a DIFFERENT angle than the other platform posts. Focus on what works best for ${platform}'s audience and format.` : ''
+}
 
-Write each post ready to publish. Focus on the most compelling, unique, or valuable ideas from this transcript.`
+Output the post only. Ready to publish. No preamble.`
 
-        const anthropic = new Anthropic({ apiKey: anthropicKey })
+          let platformResponse = ''
 
-        let fullResponse = ''
+          const messageStream = anthropic.messages.stream({
+            model: 'claude-sonnet-4-20250514',
+            max_tokens: PLATFORM_MAX_TOKENS[platform] || 1500,
+            system: systemPrompt,
+            messages: [{ role: 'user', content: userPrompt }],
+          })
 
-        const messageStream = anthropic.messages.stream({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 4096,
-          system: systemPrompt,
-          messages: [{ role: 'user', content: userPrompt }],
-        })
+          for await (const event of messageStream) {
+            if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
+              const text = event.delta.text
+              platformResponse += text
+              sendEvent('text', { content: text, platform })
+            }
+          }
 
-        for await (const event of messageStream) {
-          if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-            const text = event.delta.text
-            fullResponse += text
-            sendEvent('text', { content: text })
+          // CC-wide post-processing: safety net for em dashes + hype phrases
+          platformResults[platform] = ccPostProcess(platformResponse)
+
+          // Add separator between platforms in the stream
+          if (platforms.indexOf(platform) < platforms.length - 1) {
+            const separator = '\n\n---\n\n'
+            sendEvent('text', { content: separator })
           }
         }
 
-        // CC-wide post-processing: remove em dashes + cleanup
-        const cleanedResponse = ccPostProcess(fullResponse)
+        // Combine all platform results for the final done event
+        const fullResponse = platforms.map(p => {
+          const header = p === 'linkedin' ? '## LinkedIn Post' : p === 'twitter' ? '## X (Twitter) Post' : '## Facebook Post'
+          return `${header}\n\n${platformResults[p]}`
+        }).join('\n\n---\n\n')
 
         sendEvent('done', {
-          content: cleanedResponse,
+          content: fullResponse,
           client_name: clientName,
           transcript_title: transcriptTitle,
           platforms,
           used_custom_prompt: hasCustomPrompt,
+          platform_results: platformResults,
         })
 
         controller.close()

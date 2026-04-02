@@ -3,6 +3,9 @@ import Anthropic from '@anthropic-ai/sdk'
 import { createClient } from '@supabase/supabase-js'
 import { buildMetaPrompt } from '@/lib/content/meta-prompt'
 import { ccPostProcess } from '@/lib/content/cc-rules'
+import { selectTranscripts } from '@/lib/content/transcript-selector'
+import { extractMultipleTranscripts } from '@/lib/content/transcript-extractor'
+import { syncFathomMeetings, isFathomConfigured } from '@/lib/dna/fathom'
 
 export const maxDuration = 300
 
@@ -16,10 +19,11 @@ const supabase = createClient(
  *
  * Auto-generates a client system prompt from ALL available data:
  * - DNA profile (if exists)
- * - Onboarding call transcripts
- * - YouTube video transcripts
- * - Steven's knowledge base (client_knowledge table: SOPs, QC patterns, content insights)
+ * - Onboarding call transcripts (smart-selected, Haiku-extracted)
+ * - YouTube video transcripts (smart-selected, Haiku-extracted)
+ * - Client knowledge base (SOPs, QC patterns, content insights)
  *
+ * Uses Haiku to extract signal from full transcripts instead of brutal truncation.
  * Works with whatever data is available. Never 404s for missing data.
  */
 export async function POST(req: NextRequest) {
@@ -34,7 +38,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'ANTHROPIC_API_KEY not configured' }, { status: 500 })
   }
 
-  // Fetch client name
+  // Fetch client info (name + settings for Fathom domain matching)
   const { data: client } = await supabase
     .from('clients')
     .select('name')
@@ -47,8 +51,31 @@ export async function POST(req: NextRequest) {
 
   const clientName = client.name
 
-  // Fetch ALL data sources in parallel
-  const [dnaResult, onboardingResult, contentResult, knowledgeResult] = await Promise.all([
+  // Check client_settings for website URL (used for Fathom domain matching)
+  const { data: settings } = await supabase
+    .from('client_settings')
+    .select('dna_doc_url')
+    .eq('client_id', client_id)
+    .maybeSingle()
+
+  // Step 1: Sync Fathom meetings BEFORE selecting transcripts
+  // This ensures any new meetings are available for selection
+  // Uses title-based matching since we don't store website URLs
+  if (isFathomConfigured()) {
+    try {
+      // No website URL stored on clients — use title-based matching (searches by client name)
+      const fathomResult = await syncFathomMeetings(client_id, clientName, null, supabase)
+      if (fathomResult.new_synced > 0) {
+        console.log(`[generate-prompt] Synced ${fathomResult.new_synced} new Fathom meeting(s) for ${clientName}`)
+      }
+    } catch (err) {
+      // Don't fail prompt generation if Fathom sync fails
+      console.error(`[generate-prompt] Fathom sync failed for ${clientName}:`, err)
+    }
+  }
+
+  // Step 2: Fetch DNA, transcripts (smart selection), and knowledge base in parallel
+  const [dnaResult, transcriptSelection, knowledgeResult] = await Promise.all([
     // DNA profile
     supabase
       .from('client_dna')
@@ -57,23 +84,9 @@ export async function POST(req: NextRequest) {
       .order('version', { ascending: false })
       .limit(1)
       .maybeSingle(),
-    // Onboarding transcripts
-    supabase
-      .from('client_transcripts')
-      .select('title, transcript_text, relevance_tag')
-      .eq('client_id', client_id)
-      .in('relevance_tag', ['onboarding', 'strategy'])
-      .order('recorded_at', { ascending: false })
-      .limit(3),
-    // YouTube content transcripts
-    supabase
-      .from('client_transcripts')
-      .select('title, transcript_text, relevance_tag')
-      .eq('client_id', client_id)
-      .not('relevance_tag', 'in', '("onboarding","strategy")')
-      .order('recorded_at', { ascending: false })
-      .limit(5),
-    // Steven's knowledge base
+    // Smart transcript selection with priority ordering + word budget
+    selectTranscripts(client_id, supabase, 25000, 'system_prompt'),
+    // Knowledge base
     supabase
       .from('client_knowledge')
       .select('knowledge_type, content')
@@ -81,15 +94,19 @@ export async function POST(req: NextRequest) {
   ])
 
   const dna = dnaResult.data
-  const onboardingSamples = (onboardingResult.data || [])
-    .filter(t => t.transcript_text)
-    .map(t => ({ title: `[ONBOARDING] ${t.title}`, text: t.transcript_text.slice(0, 8000) }))
 
-  const contentSamples = (contentResult.data || [])
-    .filter(t => t.transcript_text)
-    .map(t => ({ title: `[YOUTUBE] ${t.title}`, text: t.transcript_text.slice(0, 5000) }))
+  // Separate transcripts by type for extraction with different prompts
+  const onboardingTranscripts = transcriptSelection.transcripts
+    .filter(t => t.relevance_tag === 'onboarding' || t.relevance_tag === 'strategy')
+    .map(t => ({ title: `[ONBOARDING] ${t.title}`, text: t.text }))
 
-  const transcriptSamples = [...onboardingSamples, ...contentSamples]
+  const youtubeTranscripts = transcriptSelection.transcripts
+    .filter(t => t.source === 'youtube')
+    .map(t => ({ title: `[YOUTUBE] ${t.title}`, text: t.text }))
+
+  const generalTranscripts = transcriptSelection.transcripts
+    .filter(t => t.relevance_tag !== 'onboarding' && t.relevance_tag !== 'strategy' && t.source !== 'youtube')
+    .map(t => ({ title: `[MEETING] ${t.title}`, text: t.text }))
 
   const knowledgeEntries = (knowledgeResult.data || [])
     .filter(k => k.content && k.content.length > 10)
@@ -98,8 +115,9 @@ export async function POST(req: NextRequest) {
   // Build data source summary
   const sources: string[] = []
   if (dna?.dna_markdown) sources.push('DNA profile')
-  if (onboardingSamples.length > 0) sources.push(`${onboardingSamples.length} onboarding call(s)`)
-  if (contentSamples.length > 0) sources.push(`${contentSamples.length} YouTube transcript(s)`)
+  if (onboardingTranscripts.length > 0) sources.push(`${onboardingTranscripts.length} onboarding/strategy call(s)`)
+  if (youtubeTranscripts.length > 0) sources.push(`${youtubeTranscripts.length} YouTube transcript(s)`)
+  if (generalTranscripts.length > 0) sources.push(`${generalTranscripts.length} meeting transcript(s)`)
   if (knowledgeEntries.length > 0) sources.push(`${knowledgeEntries.length} knowledge base entries`)
   if (sources.length === 0) sources.push('client name only (no data sources yet)')
 
@@ -112,10 +130,49 @@ export async function POST(req: NextRequest) {
       }
 
       try {
+        if (transcriptSelection.transcripts.length === 0) {
+          sendEvent('progress', {
+            stage: 'warning',
+            message: `No transcripts found for ${clientName}. The prompt will be generated from DNA and knowledge base only. For best results, sync Fathom meetings or add YouTube transcripts first.`,
+          })
+        }
+
+        sendEvent('progress', {
+          stage: 'extracting',
+          message: transcriptSelection.transcripts.length > 0
+            ? `Extracting signal from ${transcriptSelection.transcripts.length} transcript(s) via Haiku (${transcriptSelection.fathom_count} meetings, ${transcriptSelection.youtube_count} videos, ${transcriptSelection.total_words.toLocaleString()} words)...`
+            : 'No transcripts to extract. Proceeding with available data...',
+        })
+
+        // Extract signal from transcripts using Haiku (parallel by type)
+        // Onboarding → strategy extraction (business, compliance, audience)
+        // YouTube → voice extraction (language patterns, teaching style)
+        // General → strategy extraction (supplemental)
+        const [extractedOnboarding, extractedYouTube, extractedGeneral] = await Promise.all([
+          onboardingTranscripts.length > 0
+            ? extractMultipleTranscripts(onboardingTranscripts, 'strategy', anthropicKey, 8000)
+            : Promise.resolve([]),
+          youtubeTranscripts.length > 0
+            ? extractMultipleTranscripts(youtubeTranscripts, 'voice', anthropicKey, 5000)
+            : Promise.resolve([]),
+          generalTranscripts.length > 0
+            ? extractMultipleTranscripts(generalTranscripts, 'strategy', anthropicKey, 5000)
+            : Promise.resolve([]),
+        ])
+
+        const extractedCount = [...extractedOnboarding, ...extractedYouTube, ...extractedGeneral].filter(t => t.extracted).length
+        const totalCount = extractedOnboarding.length + extractedYouTube.length + extractedGeneral.length
+
         sendEvent('progress', {
           stage: 'building',
-          message: `Building prompt for ${clientName} from: ${sources.join(', ')}`,
+          message: `Building prompt for ${clientName} from: ${sources.join(', ')} (${extractedCount}/${totalCount} transcripts Haiku-extracted)`,
         })
+
+        const transcriptSamples = [
+          ...extractedOnboarding.map(t => ({ title: t.title, text: t.text })),
+          ...extractedYouTube.map(t => ({ title: t.title, text: t.text })),
+          ...extractedGeneral.map(t => ({ title: t.title, text: t.text })),
+        ]
 
         const { system, user } = buildMetaPrompt(
           clientName,
