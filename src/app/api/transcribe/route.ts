@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { google } from 'googleapis'
 import { extractGoogleDriveFileId } from '@/lib/utils/google-drive'
+import { google } from 'googleapis'
 
 const supabase = createClient(
   process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -10,54 +10,64 @@ const supabase = createClient(
 
 const WHISPER_MAX_SIZE = 25 * 1024 * 1024 // 25MB
 
-export const maxDuration = 120 // 2 min timeout for large files
+export const maxDuration = 120
 
-function getDriveAuth() {
+function getAccessToken(): Promise<string | null> {
   const keyJson = process.env.GOOGLE_SERVICE_ACCOUNT_KEY
-  if (!keyJson) return null
+  if (!keyJson) return Promise.resolve(null)
+
   try {
     const credentials = JSON.parse(keyJson)
-    return new google.auth.GoogleAuth({
+    const auth = new google.auth.GoogleAuth({
       credentials,
       scopes: ['https://www.googleapis.com/auth/drive.readonly'],
     })
+    return auth.getAccessToken() as Promise<string | null>
   } catch {
-    console.error('[transcribe] Failed to parse service account key')
-    return null
+    console.error('[transcribe] Failed to get access token')
+    return Promise.resolve(null)
   }
 }
 
 async function downloadFromDrive(fileId: string): Promise<{ blob: Blob; fileName: string; size: number }> {
-  const auth = getDriveAuth()
+  const token = await getAccessToken()
 
-  if (auth) {
-    // Preferred: Use Google Drive API with service account
-    const drive = google.drive({ version: 'v3', auth })
-
-    // Get file metadata first
-    const meta = await drive.files.get({
-      fileId,
-      fields: 'name,size,mimeType',
-      supportsAllDrives: true,
-    })
-
-    const fileName = meta.data.name || 'video.mp4'
-    const size = parseInt(meta.data.size || '0', 10)
-
-    // Download file content
-    const res = await drive.files.get(
-      { fileId, alt: 'media', supportsAllDrives: true },
-      { responseType: 'arraybuffer' }
+  if (token) {
+    // Get file metadata
+    const metaRes = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${fileId}?fields=name,size,mimeType&supportsAllDrives=true`,
+      { headers: { Authorization: `Bearer ${token}` } }
     )
 
-    const buffer = Buffer.from(res.data as ArrayBuffer)
-    const blob = new Blob([buffer], { type: meta.data.mimeType || 'video/mp4' })
+    if (!metaRes.ok) {
+      throw new Error(`Drive metadata failed: ${metaRes.status} ${await metaRes.text().catch(() => '')}`)
+    }
 
-    return { blob, fileName, size }
+    const meta = await metaRes.json()
+    const fileName = meta.name || 'video.mp4'
+    const size = parseInt(meta.size || '0', 10)
+
+    // Check size before downloading
+    if (size > WHISPER_MAX_SIZE) {
+      throw new Error(`FILE_TOO_LARGE:${size}`)
+    }
+
+    // Download file content
+    const dlRes = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`,
+      { headers: { Authorization: `Bearer ${token}` } }
+    )
+
+    if (!dlRes.ok) {
+      throw new Error(`Drive download failed: ${dlRes.status}`)
+    }
+
+    const blob = await dlRes.blob()
+    return { blob, fileName, size: blob.size }
   }
 
-  // Fallback: direct download URL (less reliable, kept for backwards compat)
-  console.warn('[transcribe] No service account configured, falling back to direct download URL')
+  // Fallback: direct download URL
+  console.warn('[transcribe] No service account, falling back to direct download')
   const downloadUrl = `https://drive.google.com/uc?export=download&id=${fileId}`
 
   const fileResponse = await fetch(downloadUrl, { redirect: 'follow' })
@@ -66,30 +76,7 @@ async function downloadFromDrive(fileId: string): Promise<{ blob: Blob; fileName
   }
 
   const blob = await fileResponse.blob()
-  const size = blob.size
-
-  return { blob, fileName: 'video.mp4', size }
-}
-
-async function transcribeWithWhisper(blob: Blob, fileName: string, openaiKey: string): Promise<string> {
-  const formData = new FormData()
-  formData.append('file', blob, fileName)
-  formData.append('model', 'whisper-1')
-  formData.append('response_format', 'text')
-
-  const whisperResponse = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-    method: 'POST',
-    headers: { 'Authorization': `Bearer ${openaiKey}` },
-    body: formData,
-  })
-
-  if (!whisperResponse.ok) {
-    const errText = await whisperResponse.text()
-    console.error('[transcribe] Whisper error:', errText)
-    throw new Error(`Whisper API error: ${whisperResponse.status}`)
-  }
-
-  return (await whisperResponse.text()).trim()
+  return { blob, fileName: 'video.mp4', size: blob.size }
 }
 
 export async function POST(req: NextRequest) {
@@ -102,7 +89,7 @@ export async function POST(req: NextRequest) {
 
     const openaiKey = process.env.OPENAI_API_KEY
     if (!openaiKey) {
-      return NextResponse.json({ error: 'Transcription service not configured (OPENAI_API_KEY missing)' }, { status: 500 })
+      return NextResponse.json({ error: 'Transcription not configured: OPENAI_API_KEY missing' }, { status: 500 })
     }
 
     // Get submission
@@ -129,78 +116,82 @@ export async function POST(req: NextRequest) {
     // Extract file ID
     const fileId = extractGoogleDriveFileId(submission.external_url)
     if (!fileId) {
-      await supabase
-        .from('qc_submissions')
-        .update({ transcript_status: 'failed' })
-        .eq('id', submission_id)
+      await supabase.from('qc_submissions').update({ transcript_status: 'failed' }).eq('id', submission_id)
       return NextResponse.json({ error: 'Could not extract Drive file ID from URL' }, { status: 400 })
     }
 
     // Download from Drive with retry
-    let downloaded: { blob: Blob; fileName: string; size: number }
-    let lastError: Error | null = null
+    let downloaded: { blob: Blob; fileName: string; size: number } | undefined
+    let lastError: string = ''
 
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         downloaded = await downloadFromDrive(fileId)
-        lastError = null
+        lastError = ''
         break
       } catch (err) {
-        lastError = err instanceof Error ? err : new Error(String(err))
-        console.warn(`[transcribe] Download attempt ${attempt + 1} failed: ${lastError.message}`)
+        lastError = err instanceof Error ? err.message : String(err)
+
+        // Don't retry if file is too large
+        if (lastError.startsWith('FILE_TOO_LARGE:')) {
+          const size = parseInt(lastError.split(':')[1], 10)
+          await supabase.from('qc_submissions').update({ transcript_status: 'failed' }).eq('id', submission_id)
+          return NextResponse.json(
+            { error: `File too large (${Math.round(size / 1024 / 1024)}MB, max 25MB). Use "Paste manually" instead.` },
+            { status: 413 }
+          )
+        }
+
+        console.warn(`[transcribe] Attempt ${attempt + 1} failed: ${lastError}`)
         if (attempt < 2) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)))
       }
     }
 
-    if (lastError || !downloaded!) {
-      await supabase
-        .from('qc_submissions')
-        .update({ transcript_status: 'failed' })
-        .eq('id', submission_id)
+    if (lastError || !downloaded) {
+      await supabase.from('qc_submissions').update({ transcript_status: 'failed' }).eq('id', submission_id)
       return NextResponse.json(
-        { error: `Could not download file from Google Drive after 3 attempts: ${lastError?.message}` },
+        { error: `Could not download from Drive: ${lastError}` },
         { status: 400 }
       )
     }
 
-    // Check file size
+    // Check size
     if (downloaded.size > WHISPER_MAX_SIZE) {
-      await supabase
-        .from('qc_submissions')
-        .update({ transcript_status: 'failed' })
-        .eq('id', submission_id)
+      await supabase.from('qc_submissions').update({ transcript_status: 'failed' }).eq('id', submission_id)
       return NextResponse.json(
-        { error: `File too large for transcription (${Math.round(downloaded.size / 1024 / 1024)}MB, max 25MB). Extract audio or use a shorter clip.` },
+        { error: `File too large (${Math.round(downloaded.size / 1024 / 1024)}MB, max 25MB). Use "Paste manually" instead.` },
         { status: 413 }
       )
     }
 
-    // Transcribe with Whisper
-    let transcript: string
-    try {
-      transcript = await transcribeWithWhisper(downloaded.blob, downloaded.fileName, openaiKey)
-    } catch (err) {
-      await supabase
-        .from('qc_submissions')
-        .update({ transcript_status: 'failed' })
-        .eq('id', submission_id)
-      const msg = err instanceof Error ? err.message : 'Unknown Whisper error'
-      return NextResponse.json({ error: `Transcription failed: ${msg}` }, { status: 500 })
+    // Send to Whisper
+    const formData = new FormData()
+    formData.append('file', downloaded.blob, downloaded.fileName)
+    formData.append('model', 'whisper-1')
+    formData.append('response_format', 'text')
+
+    const whisperRes = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${openaiKey}` },
+      body: formData,
+    })
+
+    if (!whisperRes.ok) {
+      const errText = await whisperRes.text()
+      console.error('[transcribe] Whisper error:', errText)
+      await supabase.from('qc_submissions').update({ transcript_status: 'failed' }).eq('id', submission_id)
+      return NextResponse.json({ error: `Transcription failed: ${whisperRes.status}` }, { status: 500 })
     }
 
-    // Save transcript
+    const transcript = (await whisperRes.text()).trim()
+
+    // Save
     await supabase
       .from('qc_submissions')
-      .update({
-        transcript: transcript,
-        transcript_status: 'completed',
-      })
+      .update({ transcript, transcript_status: 'completed' })
       .eq('id', submission_id)
 
-    return NextResponse.json({
-      success: true,
-      transcript,
-    })
+    return NextResponse.json({ success: true, transcript })
   } catch (err) {
     console.error('[transcribe] Unhandled error:', err)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
