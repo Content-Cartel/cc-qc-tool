@@ -97,6 +97,8 @@ export default function ReviewPage() {
   const [transcriptError, setTranscriptError] = useState<string | null>(null)
   const [showManualTranscript, setShowManualTranscript] = useState(false)
   const [manualTranscript, setManualTranscript] = useState('')
+  const [youtubeUrlInput, setYoutubeUrlInput] = useState('')
+  const [showYoutubeInput, setShowYoutubeInput] = useState(false)
   const [copied, setCopied] = useState(false)
   const [versionHistory, setVersionHistory] = useState<{id: string, title: string, created_at: string, external_url: string | null}[]>([])
   const [showPreviousVersion, setShowPreviousVersion] = useState(false)
@@ -355,7 +357,7 @@ export default function ReviewPage() {
       overall_pass: overallPass,
     })
 
-    // Update submission status
+    // Update submission status + auto-move to package if approved
     const newStatus = overallPass ? 'approved' : 'revision_requested'
     await supabase
       .from('qc_submissions')
@@ -365,6 +367,7 @@ export default function ReviewPage() {
         pm_reviewed_by_name: userName,
         pm_reviewed_at: new Date().toISOString(),
         qc_score: passedCount,
+        ...(overallPass ? { current_pipeline_stage: 'package' } : {}),
       })
       .eq('id', submissionId)
 
@@ -492,15 +495,19 @@ export default function ReviewPage() {
     await loadSubmission()
   }
 
-  async function handleGenerateTranscript() {
+  async function handleGenerateTranscript(ytUrl?: string) {
     if (!submission) return
     setTranscribing(true)
     setTranscriptError(null)
     try {
+      const body: Record<string, string> = { submission_id: submissionId }
+      if (ytUrl || youtubeUrlInput.trim()) {
+        body.youtube_url = ytUrl || youtubeUrlInput.trim()
+      }
       const res = await fetch('/api/transcribe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ submission_id: submissionId }),
+        body: JSON.stringify(body),
       })
       const data = await res.json()
       if (!res.ok) {
@@ -1039,7 +1046,7 @@ export default function ReviewPage() {
                           <div className="flex flex-col items-center gap-2">
                             <Loader2 size={20} className="animate-spin" style={{ color: 'var(--gold)' }} />
                             <p className="text-xs" style={{ color: 'var(--text-3)' }}>
-                              Transcribing with Whisper...
+                              Pulling transcript...
                             </p>
                           </div>
                         ) : transcriptError || submission.transcript_status === 'failed' ? (
@@ -1061,18 +1068,56 @@ export default function ReviewPage() {
                             </div>
                           </div>
                         ) : (
-                          <div className="flex flex-col items-center gap-2">
+                          <div className="flex flex-col items-center gap-3">
                             <p className="text-xs" style={{ color: 'var(--text-3)' }}>
                               No transcript yet
                             </p>
-                            {submission.external_url && (
-                              <button
-                                onClick={handleGenerateTranscript}
-                                className="btn-primary text-xs flex items-center gap-1.5"
-                              >
-                                <FileText size={12} />
-                                Generate Transcript
-                              </button>
+                            {showYoutubeInput ? (
+                              <div className="flex flex-col items-center gap-2 w-full max-w-md">
+                                <input
+                                  type="text"
+                                  placeholder="Paste YouTube URL..."
+                                  value={youtubeUrlInput}
+                                  onChange={(e) => setYoutubeUrlInput(e.target.value)}
+                                  className="w-full px-3 py-1.5 rounded-lg text-xs"
+                                  style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', color: 'var(--text)' }}
+                                />
+                                <div className="flex gap-2">
+                                  <button
+                                    onClick={() => handleGenerateTranscript()}
+                                    disabled={!youtubeUrlInput.trim()}
+                                    className="btn-primary text-xs flex items-center gap-1.5"
+                                  >
+                                    <Youtube size={12} />
+                                    Pull Transcript
+                                  </button>
+                                  <button
+                                    onClick={() => { setShowYoutubeInput(false); setYoutubeUrlInput('') }}
+                                    className="btn-secondary text-xs"
+                                  >
+                                    Cancel
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="flex gap-2">
+                                <button
+                                  onClick={() => setShowYoutubeInput(true)}
+                                  className="btn-primary text-xs flex items-center gap-1.5"
+                                >
+                                  <Youtube size={12} />
+                                  From YouTube
+                                </button>
+                                {submission.external_url && (
+                                  <button
+                                    onClick={() => handleGenerateTranscript()}
+                                    className="btn-secondary text-xs flex items-center gap-1.5"
+                                  >
+                                    <FileText size={12} />
+                                    From Drive
+                                  </button>
+                                )}
+                              </div>
                             )}
                           </div>
                         )}
