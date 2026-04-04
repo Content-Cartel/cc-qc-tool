@@ -120,24 +120,47 @@ export async function appendPostsToDoc(
   const docsApi = google.docs({ version: 'v1', auth })
 
   try {
-    const docInfo = await findWrittenContentDoc(folderId)
+    let docInfo = await findWrittenContentDoc(folderId)
     if (!docInfo) {
-      console.warn(`[google-docs] No "CC Written Content" doc found for ${clientName}. Skipping.`)
-      return null
+      // Auto-create the doc if it doesn't exist
+      const drive = google.drive({ version: 'v3', auth })
+      const file = await drive.files.create({
+        requestBody: {
+          name: `${clientName} - CC Written Content`,
+          mimeType: 'application/vnd.google-apps.document',
+          parents: [folderId],
+        },
+        supportsAllDrives: true,
+        fields: 'id',
+      })
+      if (!file.data.id) {
+        console.error(`[google-docs] Failed to create Written Content doc for ${clientName}`)
+        return null
+      }
+      docInfo = {
+        docId: file.data.id,
+        url: `https://docs.google.com/document/d/${file.data.id}/edit`,
+      }
+      console.log(`[google-docs] Created Written Content doc for ${clientName}: ${docInfo.url}`)
     }
 
     // Get current doc length to append at the end
     const doc = await docsApi.documents.get({ documentId: docInfo.docId })
     const endIndex = doc.data.body?.content?.slice(-1)?.[0]?.endIndex || 1
 
-    const today = new Date().toLocaleDateString('en-US', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-    })
+    // Calculate the Monday-Sunday week range
+    const now = new Date()
+    const dayOfWeek = now.getDay() // 0=Sun, 1=Mon, ...
+    const daysToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek
+    const monday = new Date(now)
+    monday.setDate(now.getDate() + daysToMonday)
+    const sunday = new Date(monday)
+    sunday.setDate(monday.getDate() + 6)
 
-    const header = `Generated: ${today}\n${'='.repeat(60)}\n\n`
+    const formatDate = (d: Date) => d.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })
+    const weekLabel = `Week of ${formatDate(monday)}-${formatDate(sunday)}, ${monday.getFullYear()}`
+
+    const header = `${weekLabel}\n${'='.repeat(60)}\n\n`
     const fullText = header + content + '\n\n'
     const insertIndex = Math.max(endIndex - 1, 1)
 

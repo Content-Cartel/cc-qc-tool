@@ -25,6 +25,8 @@ const supabase = createClient(
  *
  * Uses Haiku to extract signal from full transcripts instead of brutal truncation.
  * Works with whatever data is available. Never 404s for missing data.
+ *
+ * ALL heavy work happens INSIDE the stream so the client gets immediate feedback.
  */
 export async function POST(req: NextRequest) {
   const { client_id } = await req.json()
@@ -38,82 +40,6 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'ANTHROPIC_API_KEY not configured' }, { status: 500 })
   }
 
-  // Fetch client info (name + settings for Fathom domain matching)
-  const { data: client } = await supabase
-    .from('clients')
-    .select('name')
-    .eq('id', client_id)
-    .single()
-
-  if (!client) {
-    return NextResponse.json({ error: 'Client not found' }, { status: 404 })
-  }
-
-  const clientName = client.name
-
-  // Step 1: Sync Fathom meetings BEFORE selecting transcripts
-  // This ensures any new meetings are available for selection
-  // Uses title-based matching since we don't store website URLs
-  if (isFathomConfigured()) {
-    try {
-      // No website URL stored on clients — use title-based matching (searches by client name)
-      const fathomResult = await syncFathomMeetings(client_id, clientName, null, supabase)
-      if (fathomResult.new_synced > 0) {
-        console.log(`[generate-prompt] Synced ${fathomResult.new_synced} new Fathom meeting(s) for ${clientName}`)
-      }
-    } catch (err) {
-      // Don't fail prompt generation if Fathom sync fails
-      console.error(`[generate-prompt] Fathom sync failed for ${clientName}:`, err)
-    }
-  }
-
-  // Step 2: Fetch DNA, transcripts (smart selection), and knowledge base in parallel
-  const [dnaResult, transcriptSelection, knowledgeResult] = await Promise.all([
-    // DNA profile
-    supabase
-      .from('client_dna')
-      .select('dna_markdown')
-      .eq('client_id', client_id)
-      .order('version', { ascending: false })
-      .limit(1)
-      .maybeSingle(),
-    // Smart transcript selection with priority ordering + word budget
-    selectTranscripts(client_id, supabase, 25000, 'system_prompt'),
-    // Knowledge base
-    supabase
-      .from('client_knowledge')
-      .select('knowledge_type, content')
-      .eq('client_id', client_id),
-  ])
-
-  const dna = dnaResult.data
-
-  // Separate transcripts by type for extraction with different prompts
-  const onboardingTranscripts = transcriptSelection.transcripts
-    .filter(t => t.relevance_tag === 'onboarding' || t.relevance_tag === 'strategy')
-    .map(t => ({ title: `[ONBOARDING] ${t.title}`, text: t.text }))
-
-  const youtubeTranscripts = transcriptSelection.transcripts
-    .filter(t => t.source === 'youtube')
-    .map(t => ({ title: `[YOUTUBE] ${t.title}`, text: t.text }))
-
-  const generalTranscripts = transcriptSelection.transcripts
-    .filter(t => t.relevance_tag !== 'onboarding' && t.relevance_tag !== 'strategy' && t.source !== 'youtube')
-    .map(t => ({ title: `[MEETING] ${t.title}`, text: t.text }))
-
-  const knowledgeEntries = (knowledgeResult.data || [])
-    .filter(k => k.content && k.content.length > 10)
-    .map(k => ({ type: k.knowledge_type, content: k.content }))
-
-  // Build data source summary
-  const sources: string[] = []
-  if (dna?.dna_markdown) sources.push('DNA profile')
-  if (onboardingTranscripts.length > 0) sources.push(`${onboardingTranscripts.length} onboarding/strategy call(s)`)
-  if (youtubeTranscripts.length > 0) sources.push(`${youtubeTranscripts.length} YouTube transcript(s)`)
-  if (generalTranscripts.length > 0) sources.push(`${generalTranscripts.length} meeting transcript(s)`)
-  if (knowledgeEntries.length > 0) sources.push(`${knowledgeEntries.length} knowledge base entries`)
-  if (sources.length === 0) sources.push('client name only (no data sources yet)')
-
   const encoder = new TextEncoder()
 
   const stream = new ReadableStream({
@@ -123,6 +49,84 @@ export async function POST(req: NextRequest) {
       }
 
       try {
+        // Step 0: Fetch client info
+        sendEvent('progress', { stage: 'loading', message: 'Loading client data...' })
+
+        const { data: client } = await supabase
+          .from('clients')
+          .select('name')
+          .eq('id', client_id)
+          .single()
+
+        if (!client) {
+          sendEvent('error', { message: 'Client not found' })
+          controller.close()
+          return
+        }
+
+        const clientName = client.name
+
+        // Step 1: Sync Fathom meetings BEFORE selecting transcripts
+        if (isFathomConfigured()) {
+          sendEvent('progress', { stage: 'fathom', message: `Syncing Fathom meetings for ${clientName}...` })
+          try {
+            const fathomResult = await syncFathomMeetings(client_id, clientName, null, supabase)
+            if (fathomResult.new_synced > 0) {
+              console.log(`[generate-prompt] Synced ${fathomResult.new_synced} new Fathom meeting(s) for ${clientName}`)
+              sendEvent('progress', { stage: 'fathom', message: `Synced ${fathomResult.new_synced} new meeting(s)` })
+            }
+          } catch (err) {
+            console.error(`[generate-prompt] Fathom sync failed for ${clientName}:`, err)
+            sendEvent('progress', { stage: 'fathom', message: 'Fathom sync skipped (non-critical)' })
+          }
+        }
+
+        // Step 2: Fetch DNA, transcripts (smart selection), and knowledge base in parallel
+        sendEvent('progress', { stage: 'collecting', message: 'Collecting DNA, transcripts, and knowledge base...' })
+
+        const [dnaResult, transcriptSelection, knowledgeResult] = await Promise.all([
+          supabase
+            .from('client_dna')
+            .select('dna_markdown')
+            .eq('client_id', client_id)
+            .order('version', { ascending: false })
+            .limit(1)
+            .maybeSingle(),
+          selectTranscripts(client_id, supabase, 25000, 'system_prompt'),
+          supabase
+            .from('client_knowledge')
+            .select('knowledge_type, content')
+            .eq('client_id', client_id),
+        ])
+
+        const dna = dnaResult.data
+
+        // Separate transcripts by type for extraction with different prompts
+        const onboardingTranscripts = transcriptSelection.transcripts
+          .filter(t => t.relevance_tag === 'onboarding' || t.relevance_tag === 'strategy')
+          .map(t => ({ title: `[ONBOARDING] ${t.title}`, text: t.text }))
+
+        const youtubeTranscripts = transcriptSelection.transcripts
+          .filter(t => t.source === 'youtube')
+          .map(t => ({ title: `[YOUTUBE] ${t.title}`, text: t.text }))
+
+        const generalTranscripts = transcriptSelection.transcripts
+          .filter(t => t.relevance_tag !== 'onboarding' && t.relevance_tag !== 'strategy' && t.source !== 'youtube')
+          .map(t => ({ title: `[MEETING] ${t.title}`, text: t.text }))
+
+        const knowledgeEntries = (knowledgeResult.data || [])
+          .filter(k => k.content && k.content.length > 10)
+          .map(k => ({ type: k.knowledge_type, content: k.content }))
+
+        // Build data source summary
+        const sources: string[] = []
+        if (dna?.dna_markdown) sources.push('DNA profile')
+        if (onboardingTranscripts.length > 0) sources.push(`${onboardingTranscripts.length} onboarding/strategy call(s)`)
+        if (youtubeTranscripts.length > 0) sources.push(`${youtubeTranscripts.length} YouTube transcript(s)`)
+        if (generalTranscripts.length > 0) sources.push(`${generalTranscripts.length} meeting transcript(s)`)
+        if (knowledgeEntries.length > 0) sources.push(`${knowledgeEntries.length} knowledge base entries`)
+        if (sources.length === 0) sources.push('client name only (no data sources yet)')
+
         if (transcriptSelection.transcripts.length === 0) {
           sendEvent('progress', {
             stage: 'warning',
@@ -138,10 +142,6 @@ export async function POST(req: NextRequest) {
         })
 
         // Extract signal from transcripts using Haiku (parallel by type)
-        // Onboarding → strategy extraction (business, compliance, audience)
-        // YouTube → voice extraction (language patterns, teaching style)
-        // General → strategy extraction (supplemental)
-        // ALL transcripts → stories extraction (origin stories, client stories, anecdotes)
         const allTranscriptsForStories = [...onboardingTranscripts, ...youtubeTranscripts, ...generalTranscripts]
 
         const [extractedOnboarding, extractedYouTube, extractedGeneral, extractedStories] = await Promise.all([

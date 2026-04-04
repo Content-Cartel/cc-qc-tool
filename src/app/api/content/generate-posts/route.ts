@@ -16,6 +16,7 @@ interface GeneratePostsRequest {
   client_id: number
   transcript_id?: string      // from client_transcripts table
   submission_id?: string      // from qc_submissions table (uses its transcript)
+  topic?: string              // for prompt-only generation (no transcript needed)
   platforms: ('linkedin' | 'twitter' | 'facebook')[]
 }
 
@@ -31,20 +32,19 @@ const PLATFORM_MAX_TOKENS: Record<string, number> = {
 /**
  * POST /api/content/generate-posts
  *
- * Generates platform-specific written posts from a transcript + client DNA/prompt.
+ * Generates platform-specific written posts from a transcript + client DNA/prompt,
+ * or from the client's DNA/prompt alone (prompt-only mode) when no transcript is provided.
+ *
  * Each platform gets its own Claude call for focused, higher-quality output.
  * If a client has a custom system prompt, uses that. Otherwise uses DNA-based fallback.
  * Returns streaming SSE with progress events and generated content.
  */
 export async function POST(req: NextRequest) {
   const body: GeneratePostsRequest = await req.json()
-  const { client_id, transcript_id, submission_id, platforms } = body
+  const { client_id, transcript_id, submission_id, topic, platforms } = body
 
   if (!client_id) {
     return Response.json({ error: 'client_id is required' }, { status: 400 })
-  }
-  if (!transcript_id && !submission_id) {
-    return Response.json({ error: 'Either transcript_id or submission_id is required' }, { status: 400 })
   }
   if (!platforms || platforms.length === 0) {
     return Response.json({ error: 'At least one platform is required' }, { status: 400 })
@@ -55,9 +55,10 @@ export async function POST(req: NextRequest) {
     return Response.json({ error: 'ANTHROPIC_API_KEY not configured' }, { status: 500 })
   }
 
-  // Fetch transcript
+  // Fetch transcript (if provided)
   let transcriptText = ''
   let transcriptTitle = ''
+  const isPromptOnly = !transcript_id && !submission_id
 
   if (transcript_id) {
     const { data, error } = await supabase
@@ -83,6 +84,9 @@ export async function POST(req: NextRequest) {
     }
     transcriptText = data.transcript
     transcriptTitle = data.title
+  } else {
+    // Prompt-only mode: no transcript needed
+    transcriptTitle = topic || 'DNA-based generation'
   }
 
   // Fetch client DNA + custom prompt + client name in parallel
@@ -114,6 +118,11 @@ export async function POST(req: NextRequest) {
   const clientName = clientResult.data?.name || `Client ${client_id}`
   const hasCustomPrompt = !!clientPrompt?.system_prompt
 
+  // Prompt-only mode requires at least DNA or a custom prompt
+  if (isPromptOnly && !dna?.dna_markdown && !hasCustomPrompt) {
+    return Response.json({ error: 'No transcript, DNA, or prompt available for this client' }, { status: 400 })
+  }
+
   const encoder = new TextEncoder()
 
   const stream = new ReadableStream({
@@ -126,10 +135,10 @@ export async function POST(req: NextRequest) {
         const anthropic = new Anthropic({ apiKey: anthropicKey })
 
         // Extract signal from transcript via Haiku (if transcript is long enough to benefit)
-        let processedTranscript: string
+        let processedTranscript = transcriptText
         let wasExtracted = false
 
-        if (transcriptText.length > 15000) {
+        if (!isPromptOnly && transcriptText.length > 15000) {
           sendEvent('progress', {
             stage: 'extracting',
             message: `Extracting key insights from transcript via Haiku...`,
@@ -150,19 +159,17 @@ export async function POST(req: NextRequest) {
               message: `Extracted: ${extraction.original_word_count} → ${extraction.word_count} words (${extraction.compression_ratio}x compression)`,
             })
           } else {
-            // Fallback to truncation
             processedTranscript = transcriptText.slice(0, 15000)
           }
-        } else {
-          // Short transcripts don't need extraction
-          processedTranscript = transcriptText
         }
 
         sendEvent('progress', {
           stage: 'generating',
-          message: hasCustomPrompt
-            ? `Generating ${platforms.length} post(s) using ${clientName}'s custom brand prompt...`
-            : `Generating ${platforms.length} post(s) from transcript + DNA...`,
+          message: isPromptOnly
+            ? `Generating ${platforms.length} post(s) for ${clientName} from brand DNA${topic ? ` (topic: ${topic})` : ''}...`
+            : hasCustomPrompt
+              ? `Generating ${platforms.length} post(s) using ${clientName}'s custom brand prompt...`
+              : `Generating ${platforms.length} post(s) from transcript + DNA...`,
         })
 
         // Generate each platform separately for focused, higher-quality output
@@ -171,7 +178,7 @@ export async function POST(req: NextRequest) {
         for (const platform of platforms) {
           sendEvent('progress', {
             stage: 'generating',
-            message: `Writing ${platform} post...`,
+            message: `Writing ${platform} post${isPromptOnly ? ' (from DNA)' : ''}...`,
           })
 
           // Build system prompt per-platform
@@ -179,9 +186,13 @@ export async function POST(req: NextRequest) {
           const platformRules = CC_PLATFORM_DEFAULTS[platform as keyof typeof CC_PLATFORM_DEFAULTS] || ''
 
           if (hasCustomPrompt) {
+            const taskDescription = isPromptOnly
+              ? `Generate a ${platform.toUpperCase()} post based on your brand expertise and knowledge.`
+              : `Generate a ${platform.toUpperCase()} post from the transcript below.`
+
             systemPrompt = `${clientPrompt.system_prompt}
 
-## TASK: Generate a ${platform.toUpperCase()} post from the transcript below.
+## TASK: ${taskDescription}
 
 Apply ALL your brand rules, compliance checks, and voice guidelines.
 
@@ -189,16 +200,31 @@ ${platformRules}
 
 CRITICAL REMINDERS:
 - NEVER use em dashes (—). Use commas, periods, colons, or semicolons.
-- NEVER use specific numbers unless DIRECTLY quoted from the transcript.
+- NEVER use specific numbers unless DIRECTLY quoted from the transcript or system prompt.
 - NEVER use hype phrases: "game-changer," "mind-blowing," "buckle up," "let that sink in," "here's the thing," "read that again," "this is huge."
 - NEVER use generic filler: "Let me know what you think!", "Drop a comment!", "Follow for more!"
 - Output the post ONLY. No commentary, no "here's the post," no meta-notes. Ready to copy-paste.`
           } else {
-            // Use the structured fallback prompt that parses DNA
             systemPrompt = buildFallbackPrompt(clientName, dna?.dna_markdown || null, platform as 'linkedin' | 'twitter' | 'facebook')
           }
 
-          const userPrompt = `Transcript from "${transcriptTitle}"${wasExtracted ? ' (key insights extracted via AI)' : ''}:
+          // Build user prompt based on mode
+          let userPrompt: string
+
+          if (isPromptOnly) {
+            userPrompt = `Write ONE original ${platform} post as ${clientName}.
+
+${topic ? `Topic/theme to focus on: ${topic}` : 'Pick the single most compelling topic from the content pillars, proof points, or unique mechanisms in your system prompt.'}
+
+Use the voice, stories, proof points, and content strategy from the system prompt. Go DEEP on one specific idea.
+
+CRITICAL:
+- Do NOT invent specific numbers, client names, or case study details not in the system prompt.
+- Use only facts, metrics, and examples that appear in the system prompt.
+- Write from first person as ${clientName} sharing expertise.
+- Output the post only. Ready to publish. No preamble.`
+          } else {
+            userPrompt = `Transcript from "${transcriptTitle}"${wasExtracted ? ' (key insights extracted via AI)' : ''}:
 
 ---
 ${processedTranscript}
@@ -209,6 +235,7 @@ Write ONE ${platform} post from this transcript. Pick the single most compelling
 }
 
 Output the post only. Ready to publish. No preamble.`
+          }
 
           let platformResponse = ''
 
@@ -249,6 +276,7 @@ Output the post only. Ready to publish. No preamble.`
           transcript_title: transcriptTitle,
           platforms,
           used_custom_prompt: hasCustomPrompt,
+          prompt_only: isPromptOnly,
           platform_results: platformResults,
         })
 

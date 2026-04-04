@@ -607,20 +607,25 @@ export default function ReviewPage() {
       const reader = res.body?.getReader()
       const decoder = new TextDecoder()
       let accumulated = ''
+      let buffer = ''
 
       if (reader) {
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
-          const chunk = decoder.decode(value, { stream: true })
-          const lines = chunk.split('\n')
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
+          buffer += decoder.decode(value, { stream: true })
+          const segments = buffer.split('\n\n')
+          buffer = segments.pop() || ''
+
+          for (const segment of segments) {
+            if (segment.startsWith('data: ')) {
               try {
-                const event = JSON.parse(line.slice(6))
+                const event = JSON.parse(segment.slice(6))
                 if (event.type === 'text') {
                   accumulated += event.content
                   setGeneratedPosts(accumulated)
+                } else if (event.type === 'error') {
+                  setGeneratedPosts(`Error: ${event.message || 'Generation failed'}`)
                 }
               } catch {
                 // skip malformed JSON

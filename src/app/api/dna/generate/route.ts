@@ -315,12 +315,22 @@ export async function POST(req: NextRequest) {
           return
         }
 
-        // Auto-link DNA viewer in PM dashboard
-        const dnaViewerUrl = `https://qc.contentcartel.net/dna/${client_id}`
-        await supabase
+        // Auto-link DNA viewer in PM dashboard — but only if no Google Doc URL is already set
+        const { data: existingSettings } = await supabase
           .from('client_settings')
-          .update({ dna_doc_url: dnaViewerUrl })
+          .select('dna_doc_url')
           .eq('client_id', client_id)
+          .maybeSingle()
+
+        const existingUrl = existingSettings?.dna_doc_url || ''
+        const hasGoogleDocUrl = existingUrl.includes('docs.google.com')
+
+        if (!hasGoogleDocUrl) {
+          const dnaViewerUrl = `https://qc.contentcartel.net/dna/${client_id}`
+          await supabase
+            .from('client_settings')
+            .upsert({ client_id, dna_doc_url: dnaViewerUrl }, { onConflict: 'client_id' })
+        }
 
         const fathomIncluded = selectedTranscripts.filter(t => t.source === 'fathom').length
         const ytTranscriptsIncluded = selectedTranscripts.filter(t => t.source === 'youtube').length

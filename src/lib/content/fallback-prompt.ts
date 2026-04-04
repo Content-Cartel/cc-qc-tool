@@ -14,7 +14,7 @@ import { CC_WIDE_RULES, CC_PLATFORM_DEFAULTS } from './cc-rules'
  * Extract a specific section from DNA markdown by header.
  * DNA uses "## N. SECTION NAME" format.
  */
-function extractDNASection(dna: string, sectionName: string): string | null {
+export function extractDNASection(dna: string, sectionName: string): string | null {
   // Match section headers like "## 2. VOICE FINGERPRINT" or "## 7. OFF-LIMITS"
   const regex = new RegExp(
     `## \\d+\\.\\s*${sectionName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}[^\\n]*\\n([\\s\\S]*?)(?=\\n## \\d+\\.|$)`,

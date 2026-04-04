@@ -86,24 +86,46 @@ export default function DNADashboardPage() {
         body: JSON.stringify({ client_id: clientId }),
       })
 
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ error: `Server error (${res.status})` }))
+        setPromptContent(`Error: ${err.error || 'Generation failed'}`)
+        setPromptStreaming(false)
+        setGeneratingFor(null)
+        return
+      }
+
       const reader = res.body?.getReader()
       const decoder = new TextDecoder()
       let accumulated = ''
+      let buffer = ''
+      let lastProgress = ''
 
       if (reader) {
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
-          const chunk = decoder.decode(value, { stream: true })
-          for (const line of chunk.split('\n')) {
-            if (line.startsWith('data: ')) {
+          buffer += decoder.decode(value, { stream: true })
+          const segments = buffer.split('\n\n')
+          buffer = segments.pop() || ''
+
+          for (const segment of segments) {
+            if (segment.startsWith('data: ')) {
               try {
-                const event = JSON.parse(line.slice(6))
+                const event = JSON.parse(segment.slice(6))
                 if (event.type === 'text') {
                   accumulated += event.content
                   setPromptContent(accumulated)
+                } else if (event.type === 'progress') {
+                  lastProgress = event.message as string
+                  if (!accumulated) {
+                    setPromptContent(lastProgress)
+                  }
+                } else if (event.type === 'error') {
+                  setPromptContent(`Error: ${event.message || 'Generation failed'}`)
                 } else if (event.type === 'done') {
-                  break
+                  if (event.content) {
+                    setPromptContent(event.content as string)
+                  }
                 }
               } catch { /* skip */ }
             }
@@ -174,7 +196,7 @@ export default function DNADashboardPage() {
               <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-3)' }}>Have Prompts</p>
             </div>
             <div className="card p-3 text-center">
-              <p className="text-2xl font-bold" style={{ color: 'var(--blue)' }}>{clients.filter(c => c.dna_doc_url && c.dna_doc_url.startsWith('http')).length}</p>
+              <p className="text-2xl font-bold" style={{ color: 'var(--blue)' }}>{clients.filter(c => c.dna_doc_url && c.dna_doc_url.includes('docs.google.com')).length}</p>
               <p className="text-[10px] uppercase tracking-wider" style={{ color: 'var(--text-3)' }}>DNA Docs</p>
             </div>
             <div className="card p-3 text-center">
@@ -247,14 +269,16 @@ export default function DNADashboardPage() {
                           {/* DNA Doc */}
                           <div className="flex items-center justify-between">
                             <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>DNA Doc</span>
-                            {client.dna_doc_url && client.dna_doc_url.startsWith('http') && !client.dna_doc_url.includes('qc.contentcartel') ? (
-                              <a href={client.dna_doc_url} target="_blank" rel="noopener noreferrer"
-                                className="text-[10px] flex items-center gap-1 font-medium" style={{ color: 'var(--blue)' }}>
-                                <ExternalLink size={9} /> Open Doc
-                              </a>
-                            ) : (
-                              <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>Not linked</span>
-                            )}
+                            <div className="flex items-center gap-2">
+                              {client.dna_doc_url && client.dna_doc_url.includes('docs.google.com') ? (
+                                <a href={client.dna_doc_url} target="_blank" rel="noopener noreferrer"
+                                  className="text-[10px] flex items-center gap-1 font-medium" style={{ color: 'var(--blue)' }}>
+                                  <ExternalLink size={9} /> Open Doc
+                                </a>
+                              ) : (
+                                <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>Not linked</span>
+                              )}
+                            </div>
                           </div>
 
                           {/* Transcripts */}
