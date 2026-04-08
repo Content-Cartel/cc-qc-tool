@@ -228,15 +228,20 @@ export default function ReviewPage() {
     setSpellingLoaded(true)
   }, [supabase, submissionId])
 
-  // Fetch video metadata when submission loads
+  // Fetch video metadata once when submission first loads
+  const videoInfoFetchedRef = React.useRef(false)
+
   const fetchVideoMetadata = useCallback(async () => {
-    if (!submission?.external_url) return
+    if (!submission?.external_url || !submission?.id) return
+    if (videoInfoFetchedRef.current) return
     // Check if already cached in metadata
     const cached = (submission.metadata as Record<string, unknown>)?.video_info
     if (cached) {
       setVideoInfo(cached as typeof videoInfo)
+      videoInfoFetchedRef.current = true
       return
     }
+    videoInfoFetchedRef.current = true
     setVideoInfoLoading(true)
     setVideoInfoError(null)
     try {
@@ -250,13 +255,16 @@ export default function ReviewPage() {
         setVideoInfo(data.video_info)
       } else {
         setVideoInfoError(data.error || 'Could not fetch video metadata')
+        videoInfoFetchedRef.current = false // allow retry
       }
     } catch {
       setVideoInfoError('Failed to fetch video metadata')
+      videoInfoFetchedRef.current = false // allow retry
     } finally {
       setVideoInfoLoading(false)
     }
-  }, [submission?.id, submission?.external_url, submission?.metadata])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [submission?.id, submission?.external_url])
 
   useEffect(() => {
     if (submission) {
@@ -608,14 +616,16 @@ export default function ReviewPage() {
           setTranscribing(false)
           return
         }
-        // Light query: only fetch transcript fields, not the whole submission
+        // Light query: only check transcript_status
         const { data } = await supabase
           .from('qc_submissions')
-          .select('transcript, transcript_status, metadata')
+          .select('transcript_status')
           .eq('id', submissionId)
           .single()
         if (data && (data.transcript_status === 'completed' || data.transcript_status === 'failed')) {
-          // Only reload full submission once when done
+          // Stop polling first, then reload once
+          if (transcriptPollRef.current) clearInterval(transcriptPollRef.current)
+          transcriptPollRef.current = null
           await loadSubmission()
         }
       }, 5000)
