@@ -597,7 +597,7 @@ export default function ReviewPage() {
         return
       }
 
-      // Poll for completion every 3 seconds
+      // Poll only transcript status every 5 seconds (not the full submission)
       const startTime = Date.now()
       const maxWait = 10 * 60 * 1000 // 10 minutes
       transcriptPollRef.current = setInterval(async () => {
@@ -608,8 +608,17 @@ export default function ReviewPage() {
           setTranscribing(false)
           return
         }
-        await loadSubmission()
-      }, 3000)
+        // Light query: only fetch transcript fields, not the whole submission
+        const { data } = await supabase
+          .from('qc_submissions')
+          .select('transcript, transcript_status, metadata')
+          .eq('id', submissionId)
+          .single()
+        if (data && (data.transcript_status === 'completed' || data.transcript_status === 'failed')) {
+          // Only reload full submission once when done
+          await loadSubmission()
+        }
+      }, 5000)
     } catch {
       setTranscriptError('Network error — try again')
       setTranscribing(false)
