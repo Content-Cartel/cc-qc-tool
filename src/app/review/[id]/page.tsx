@@ -573,6 +573,18 @@ export default function ReviewPage() {
     await loadSubmission()
   }
 
+  const transcriptChannelRef = React.useRef<ReturnType<typeof supabase.channel> | null>(null)
+
+  // Cleanup realtime channel on unmount
+  useEffect(() => {
+    return () => {
+      if (transcriptChannelRef.current) {
+        supabase.removeChannel(transcriptChannelRef.current)
+      }
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   async function handleGenerateTranscript() {
     if (!submission) return
     setTranscribing(true)
@@ -590,9 +602,49 @@ export default function ReviewPage() {
         return
       }
 
-      // API returns result directly — reload submission to get the transcript
-      await loadSubmission()
-      setTranscribing(false)
+      // Listen for Railway to finish via Supabase Realtime
+      if (transcriptChannelRef.current) {
+        supabase.removeChannel(transcriptChannelRef.current)
+      }
+
+      const channel = supabase
+        .channel(`transcript-${submissionId}`)
+        .on('postgres_changes', {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'qc_submissions',
+          filter: `id=eq.${submissionId}`,
+        }, (payload) => {
+          const row = payload.new as Record<string, unknown>
+          const status = row.transcript_status as string
+          if (status === 'completed' || status === 'failed') {
+            supabase.removeChannel(channel)
+            transcriptChannelRef.current = null
+            setSubmission(prev => prev ? {
+              ...prev,
+              transcript: String(row.transcript || ''),
+              transcript_status: status as TranscriptStatus,
+              metadata: (row.metadata as Record<string, unknown>) || null,
+            } : prev)
+            setTranscribing(false)
+            if (status === 'failed') {
+              setTranscriptError(String((row.metadata as Record<string, unknown>)?.transcription_error || 'Transcription failed'))
+            }
+          }
+        })
+        .subscribe()
+
+      transcriptChannelRef.current = channel
+
+      // Safety timeout: 10 minutes
+      setTimeout(() => {
+        if (transcriptChannelRef.current) {
+          supabase.removeChannel(transcriptChannelRef.current)
+          transcriptChannelRef.current = null
+          setTranscriptError('Transcription is taking longer than expected — check back in a few minutes')
+          setTranscribing(false)
+        }
+      }, 10 * 60 * 1000)
     } catch {
       setTranscriptError('Network error — try again')
       setTranscribing(false)
