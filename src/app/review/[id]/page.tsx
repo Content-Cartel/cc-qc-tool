@@ -573,18 +573,6 @@ export default function ReviewPage() {
     await loadSubmission()
   }
 
-  const transcriptChannelRef = React.useRef<ReturnType<typeof supabase.channel> | null>(null)
-
-  // Cleanup realtime channel on unmount
-  useEffect(() => {
-    return () => {
-      if (transcriptChannelRef.current) {
-        supabase.removeChannel(transcriptChannelRef.current)
-      }
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
   async function handleGenerateTranscript() {
     if (!submission) return
     setTranscribing(true)
@@ -597,58 +585,14 @@ export default function ReviewPage() {
       })
       const data = await res.json()
       if (!res.ok) {
-        setTranscriptError(data.error || 'Failed to start transcription')
+        setTranscriptError(data.error || 'Transcription failed')
         setTranscribing(false)
         return
       }
 
-      // Use Supabase Realtime to listen for transcript completion
-      // This avoids polling and prevents any re-renders until the row actually changes
-      if (transcriptChannelRef.current) {
-        supabase.removeChannel(transcriptChannelRef.current)
-      }
-
-      const channel = supabase
-        .channel(`transcript-${submissionId}`)
-        .on('postgres_changes', {
-          event: 'UPDATE',
-          schema: 'public',
-          table: 'qc_submissions',
-          filter: `id=eq.${submissionId}`,
-        }, (payload) => {
-          const row = payload.new as Record<string, unknown>
-          const status = row.transcript_status as string
-          if (status === 'completed' || status === 'failed') {
-            // Unsubscribe immediately
-            supabase.removeChannel(channel)
-            transcriptChannelRef.current = null
-            // Merge transcript fields into existing submission
-            setSubmission(prev => prev ? {
-              ...prev,
-              transcript: (row.transcript as string) || null,
-              transcript_status: status as TranscriptStatus,
-              metadata: (row.metadata as Record<string, unknown>) || null,
-            } : prev)
-            setTranscribing(false)
-            if (status === 'failed') {
-              const meta = row.metadata as Record<string, unknown> | null
-              setTranscriptError((meta?.transcription_error as string) || 'Transcription failed')
-            }
-          }
-        })
-        .subscribe()
-
-      transcriptChannelRef.current = channel
-
-      // Safety timeout: 10 minutes
-      setTimeout(() => {
-        if (transcriptChannelRef.current) {
-          supabase.removeChannel(transcriptChannelRef.current)
-          transcriptChannelRef.current = null
-          setTranscriptError('Transcription is taking longer than expected — check back in a few minutes')
-          setTranscribing(false)
-        }
-      }, 10 * 60 * 1000)
+      // API returns result directly — reload submission to get the transcript
+      await loadSubmission()
+      setTranscribing(false)
     } catch {
       setTranscriptError('Network error — try again')
       setTranscribing(false)
