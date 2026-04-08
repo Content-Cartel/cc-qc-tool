@@ -571,22 +571,17 @@ export default function ReviewPage() {
     await loadSubmission()
   }
 
-  const transcriptPollRef = React.useRef<ReturnType<typeof setInterval> | null>(null)
+  const transcriptChannelRef = React.useRef<ReturnType<typeof supabase.channel> | null>(null)
 
-  // Stop polling when transcript status changes
+  // Cleanup realtime channel on unmount
   useEffect(() => {
-    if (submission?.transcript_status === 'completed' || submission?.transcript_status === 'failed') {
-      if (transcriptPollRef.current) {
-        clearInterval(transcriptPollRef.current)
-        transcriptPollRef.current = null
-      }
-      setTranscribing(false)
-      if (submission.transcript_status === 'failed') {
-        const meta = submission.metadata as Record<string, unknown> | null
-        setTranscriptError((meta?.error as string) || 'Transcription failed')
+    return () => {
+      if (transcriptChannelRef.current) {
+        supabase.removeChannel(transcriptChannelRef.current)
       }
     }
-  }, [submission?.transcript_status])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   async function handleGenerateTranscript() {
     if (!submission) return
@@ -605,38 +600,53 @@ export default function ReviewPage() {
         return
       }
 
-      // Poll only transcript status every 5 seconds (not the full submission)
-      const startTime = Date.now()
-      const maxWait = 10 * 60 * 1000 // 10 minutes
-      transcriptPollRef.current = setInterval(async () => {
-        if (Date.now() - startTime > maxWait) {
-          if (transcriptPollRef.current) clearInterval(transcriptPollRef.current)
-          transcriptPollRef.current = null
+      // Use Supabase Realtime to listen for transcript completion
+      // This avoids polling and prevents any re-renders until the row actually changes
+      if (transcriptChannelRef.current) {
+        supabase.removeChannel(transcriptChannelRef.current)
+      }
+
+      const channel = supabase
+        .channel(`transcript-${submissionId}`)
+        .on('postgres_changes', {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'qc_submissions',
+          filter: `id=eq.${submissionId}`,
+        }, (payload) => {
+          const row = payload.new as Record<string, unknown>
+          const status = row.transcript_status as string
+          if (status === 'completed' || status === 'failed') {
+            // Unsubscribe immediately
+            supabase.removeChannel(channel)
+            transcriptChannelRef.current = null
+            // Merge transcript fields into existing submission
+            setSubmission(prev => prev ? {
+              ...prev,
+              transcript: (row.transcript as string) || null,
+              transcript_status: status as TranscriptStatus,
+              metadata: (row.metadata as Record<string, unknown>) || null,
+            } : prev)
+            setTranscribing(false)
+            if (status === 'failed') {
+              const meta = row.metadata as Record<string, unknown> | null
+              setTranscriptError((meta?.transcription_error as string) || 'Transcription failed')
+            }
+          }
+        })
+        .subscribe()
+
+      transcriptChannelRef.current = channel
+
+      // Safety timeout: 10 minutes
+      setTimeout(() => {
+        if (transcriptChannelRef.current) {
+          supabase.removeChannel(transcriptChannelRef.current)
+          transcriptChannelRef.current = null
           setTranscriptError('Transcription is taking longer than expected — check back in a few minutes')
           setTranscribing(false)
-          return
         }
-        // Light query: only check transcript_status + transcript text
-        const { data } = await supabase
-          .from('qc_submissions')
-          .select('transcript, transcript_status, metadata')
-          .eq('id', submissionId)
-          .single()
-        if (data && (data.transcript_status === 'completed' || data.transcript_status === 'failed')) {
-          // Stop polling first
-          if (transcriptPollRef.current) clearInterval(transcriptPollRef.current)
-          transcriptPollRef.current = null
-          // Merge transcript fields into existing submission WITHOUT full reload
-          // This avoids re-mounting the video iframe
-          setSubmission(prev => prev ? {
-            ...prev,
-            transcript: data.transcript,
-            transcript_status: data.transcript_status as TranscriptStatus,
-            metadata: data.metadata as Record<string, unknown> | null,
-          } : prev)
-          setTranscribing(false)
-        }
-      }, 5000)
+      }, 10 * 60 * 1000)
     } catch {
       setTranscriptError('Network error — try again')
       setTranscribing(false)
