@@ -983,7 +983,6 @@ export default function ReviewPage() {
                   <VersionComparison
                     currentVersion={{ id: submission.id, title: submission.title, created_at: submission.created_at, external_url: submission.external_url }}
                     previousVersion={prevVersion}
-                    currentNotes={notes}
                     onClose={() => setShowPreviousVersion(false)}
                   />
                 )
