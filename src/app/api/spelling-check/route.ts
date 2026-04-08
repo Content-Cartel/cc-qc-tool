@@ -187,17 +187,59 @@ Return ONLY valid JSON array, no other text. If no risks, return [].`,
     // If we have Deepgram words, snap each issue to the nearest exact word timestamp
     if (dgWords.length > 0) {
       for (const issue of issues) {
-        const target = issue.word.toLowerCase()
-        // Find the Deepgram word that best matches
-        const match = dgWords.find(w =>
-          w.word.toLowerCase() === target ||
-          (w.punctuated_word || '').toLowerCase() === target ||
-          w.word.toLowerCase().includes(target) ||
-          target.includes(w.word.toLowerCase())
-        )
-        if (match) {
-          issue.timestamp_seconds = match.start
+        const target = issue.word.toLowerCase().trim()
+        const targetWords = target.split(/\s+/)
+
+        let bestMatch: DeepgramWord | null = null
+
+        if (targetWords.length === 1) {
+          // Single word: exact match only (no substring matching)
+          bestMatch = dgWords.find(w =>
+            w.word.toLowerCase() === target ||
+            (w.punctuated_word || '').toLowerCase().replace(/[.,!?;:'"]/g, '') === target
+          ) || null
+
+          // If no exact match, find the closest word near Claude's estimated timestamp
+          if (!bestMatch && issue.timestamp_seconds > 0) {
+            const nearbyWords = dgWords.filter(w =>
+              Math.abs(w.start - issue.timestamp_seconds) < 15 &&
+              (w.word.toLowerCase().startsWith(target.slice(0, 3)) ||
+               target.startsWith(w.word.toLowerCase().slice(0, 3)))
+            )
+            if (nearbyWords.length > 0) {
+              bestMatch = nearbyWords.reduce((a, b) =>
+                Math.abs(a.start - issue.timestamp_seconds) < Math.abs(b.start - issue.timestamp_seconds) ? a : b
+              )
+            }
+          }
+        } else {
+          // Multi-word phrase: find the first word of the phrase
+          const firstWord = targetWords[0]
+          for (let i = 0; i < dgWords.length; i++) {
+            const w = dgWords[i]
+            if (w.word.toLowerCase() === firstWord ||
+                (w.punctuated_word || '').toLowerCase().replace(/[.,!?;:'"]/g, '') === firstWord) {
+              // Check if subsequent words also match
+              let phraseMatch = true
+              for (let j = 1; j < targetWords.length && i + j < dgWords.length; j++) {
+                const nextWord = dgWords[i + j].word.toLowerCase()
+                if (nextWord !== targetWords[j]) {
+                  phraseMatch = false
+                  break
+                }
+              }
+              if (phraseMatch) {
+                bestMatch = w
+                break
+              }
+            }
+          }
         }
+
+        if (bestMatch) {
+          issue.timestamp_seconds = bestMatch.start
+        }
+        // If no match found, keep Claude's estimated timestamp from the [MM:SS] chunks
       }
     }
 

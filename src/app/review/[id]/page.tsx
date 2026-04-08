@@ -1093,6 +1093,27 @@ export default function ReviewPage() {
                       const hasSearch = searchLower.length > 0
                       const matchCount = hasSearch ? (text.toLowerCase().match(new RegExp(searchLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g')) || []).length : 0
 
+                      // Build timestamped chunks from Deepgram words
+                      const dgWords = ((submission.metadata as Record<string, unknown>)?.deepgram_words || []) as Array<{ word: string; start: number; end: number; punctuated_word?: string }>
+                      const timestampedChunks: Array<{ time: number; text: string }> = []
+                      if (dgWords.length > 0) {
+                        let chunkStart = 0
+                        let chunkWords: string[] = []
+                        for (const w of dgWords) {
+                          if (w.start - chunkStart >= 10 && chunkWords.length > 0) {
+                            timestampedChunks.push({ time: chunkStart, text: chunkWords.join(' ') })
+                            chunkStart = w.start
+                            chunkWords = []
+                          }
+                          chunkWords.push(w.punctuated_word || w.word)
+                        }
+                        if (chunkWords.length > 0) {
+                          timestampedChunks.push({ time: chunkStart, text: chunkWords.join(' ') })
+                        }
+                      }
+
+                      const formatTs = (s: number) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`
+
                       return (
                         <div>
                           {/* Source label */}
@@ -1107,6 +1128,11 @@ export default function ReviewPage() {
                             <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>
                               {text.split(/\s+/).length.toLocaleString()} words
                             </span>
+                            {timestampedChunks.length > 0 && (
+                              <span className="text-[10px]" style={{ color: 'var(--text-3)' }}>
+                                Timestamped
+                              </span>
+                            )}
                             {hasSearch && (
                               <span className="text-[10px] font-medium" style={{ color: matchCount > 0 ? 'var(--gold)' : 'var(--red)' }}>
                                 {matchCount} match{matchCount !== 1 ? 'es' : ''}
@@ -1117,7 +1143,28 @@ export default function ReviewPage() {
                             className={`text-xs leading-relaxed overflow-y-auto rounded-lg p-3 transition-all ${transcriptExpanded ? 'max-h-[600px]' : 'max-h-48'}`}
                             style={{ color: 'var(--text-2)', background: 'var(--surface-2)' }}
                           >
-                            {hasSearch && matchCount > 0 ? (
+                            {timestampedChunks.length > 0 ? (
+                              <div className="space-y-2">
+                                {timestampedChunks.map((chunk, i) => (
+                                  <div key={i} className="flex gap-2">
+                                    <span
+                                      className="text-[10px] font-mono shrink-0 mt-0.5 px-1 py-0.5 rounded cursor-pointer hover:opacity-80"
+                                      style={{ color: 'var(--gold)', background: 'rgba(212, 168, 67, 0.1)' }}
+                                      title={`Jump to ${formatTs(chunk.time)}`}
+                                    >
+                                      {formatTs(chunk.time)}
+                                    </span>
+                                    <span>
+                                      {hasSearch && matchCount > 0 ? (
+                                        <HighlightedText text={chunk.text} search={transcriptSearch} />
+                                      ) : (
+                                        chunk.text
+                                      )}
+                                    </span>
+                                  </div>
+                                ))}
+                              </div>
+                            ) : hasSearch && matchCount > 0 ? (
                               <HighlightedText text={text} search={transcriptSearch} />
                             ) : (
                               text
