@@ -1228,7 +1228,7 @@ export default function ReviewPage() {
                             <AlertCircle size={20} style={{ color: 'var(--red)' }} />
                             <p className="text-xs" style={{ color: 'var(--red)' }}>
                               {transcriptError
-                                || (submission.metadata as Record<string, unknown>)?.transcription_error as string
+                                || String((submission.metadata as Record<string, unknown>)?.transcription_error || '')
                                 || 'Transcription failed'}
                             </p>
                             <div className="flex gap-2">
