@@ -12,6 +12,8 @@ import PipelineTracker from '@/components/pipeline-tracker'
 import QCChecklist from '@/components/qc-checklist'
 import VideoPlayerNotes from '@/components/video-player-notes'
 import BrandReference from '@/components/brand-reference'
+import QCPreCheckCard from '@/components/qc-precheck-card'
+import VersionComparison from '@/components/version-comparison'
 import { createClient } from '@/lib/supabase/client'
 import { useAuth } from '@/hooks/use-auth'
 import { timeAgo, formatDateTime } from '@/lib/utils/date'
@@ -126,6 +128,15 @@ export default function ReviewPage() {
     status: string
   }>>([])
   const [spellingLoaded, setSpellingLoaded] = useState(false)
+  // Video metadata state
+  const [videoInfo, setVideoInfo] = useState<{
+    width: number; height: number; duration_seconds: number; aspect_ratio: string;
+    is_portrait: boolean; mime_type: string; file_size_bytes: number; file_name: string;
+    resolution_check: { expected_orientation: string; actual_orientation: string; is_correct: boolean; message: string };
+    fetched_at: string;
+  } | null>(null)
+  const [videoInfoLoading, setVideoInfoLoading] = useState(false)
+  const [videoInfoError, setVideoInfoError] = useState<string | null>(null)
 
   const userName = user || 'PM'
 
@@ -216,6 +227,42 @@ export default function ReviewPage() {
     setSpellingResults(data || [])
     setSpellingLoaded(true)
   }, [supabase, submissionId])
+
+  // Fetch video metadata when submission loads
+  const fetchVideoMetadata = useCallback(async () => {
+    if (!submission?.external_url) return
+    // Check if already cached in metadata
+    const cached = (submission.metadata as Record<string, unknown>)?.video_info
+    if (cached) {
+      setVideoInfo(cached as typeof videoInfo)
+      return
+    }
+    setVideoInfoLoading(true)
+    setVideoInfoError(null)
+    try {
+      const res = await fetch('/api/video-metadata', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ submission_id: submission.id }),
+      })
+      const data = await res.json()
+      if (res.ok && data.video_info) {
+        setVideoInfo(data.video_info)
+      } else {
+        setVideoInfoError(data.error || 'Could not fetch video metadata')
+      }
+    } catch {
+      setVideoInfoError('Failed to fetch video metadata')
+    } finally {
+      setVideoInfoLoading(false)
+    }
+  }, [submission?.id, submission?.external_url, submission?.metadata])
+
+  useEffect(() => {
+    if (submission) {
+      fetchVideoMetadata()
+    }
+  }, [submission?.id, fetchVideoMetadata])
 
   useEffect(() => {
     if (submission?.client_id) {
@@ -370,7 +417,7 @@ export default function ReviewPage() {
       })
       .eq('id', submissionId)
 
-    // Notify the AI agent about QC result
+    // Notify the AI agent about QC result (includes Drive link for Slack)
     if (submission) {
       const failedItems = Object.entries(results)
         .filter(([, passed]) => !passed)
@@ -384,7 +431,25 @@ export default function ReviewPage() {
           ? [`Passed QC: ${passedCount}/10`]
           : [`Failed items: ${failedItems.join(', ')}`],
         content_title: submission.title,
+        external_url: submission.external_url || undefined,
       })
+
+      // Notify editor in-app about QC result
+      if (overallPass) {
+        await supabase.from('notifications').insert({
+          user_name: submission.submitted_by_name,
+          submission_id: submissionId,
+          message: `Your video "${submission.title}" has been approved — ready for packaging.${submission.external_url ? ` Link: ${submission.external_url}` : ''}`,
+          type: 'approved',
+        })
+      } else {
+        await supabase.from('notifications').insert({
+          user_name: submission.submitted_by_name,
+          submission_id: submissionId,
+          message: `Your video "${submission.title}" needs revision. Failed: ${failedItems.join(', ')}`,
+          type: 'revision_requested',
+        })
+      }
     }
 
     await loadSubmission()
@@ -776,6 +841,30 @@ export default function ReviewPage() {
                 {submission.current_pipeline_stage && (
                   <PipelineStageLabel stage={submission.current_pipeline_stage} />
                 )}
+                {/* Video Resolution Badge */}
+                {videoInfo && (
+                  <span
+                    className="text-[10px] font-semibold px-2 py-0.5 rounded-full flex items-center gap-1"
+                    style={{
+                      background: videoInfo.resolution_check.is_correct
+                        ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.2)',
+                      color: videoInfo.resolution_check.is_correct
+                        ? 'var(--green)' : 'var(--red)',
+                      border: videoInfo.resolution_check.is_correct
+                        ? '1px solid rgba(34, 197, 94, 0.3)' : '1px solid rgba(239, 68, 68, 0.4)',
+                    }}
+                    title={videoInfo.resolution_check.message}
+                  >
+                    {videoInfo.resolution_check.is_correct ? <CheckCircle2 size={10} /> : <AlertCircle size={10} />}
+                    {videoInfo.width}x{videoInfo.height}
+                  </span>
+                )}
+                {videoInfoLoading && (
+                  <span className="text-[10px] flex items-center gap-1" style={{ color: 'var(--text-3)' }}>
+                    <Loader2 size={10} className="animate-spin" />
+                    Checking resolution...
+                  </span>
+                )}
                 <span className="text-xs" style={{ color: 'var(--text-3)' }}>
                   {submission.client_name}
                 </span>
@@ -846,56 +935,20 @@ export default function ReviewPage() {
           <div className="grid grid-cols-1 lg:grid-cols-5 gap-5">
             {/* Left: Video + Notes */}
             <div className="lg:col-span-3 space-y-5">
-              {/* Previous Version (comparison mode) */}
+              {/* Version Comparison (side-by-side) */}
               {showPreviousVersion && submission.revision_of && (() => {
                 const currentIdx = versionHistory.findIndex(v => v.id === submissionId)
                 const prevVersion = currentIdx > 0 ? versionHistory[currentIdx - 1] : null
                 if (!prevVersion) return null
-                const prevEmbedUrl = prevVersion.external_url ? getGoogleDriveEmbedUrl(prevVersion.external_url) : null
-                if (!prevEmbedUrl) return null
                 return (
-                  <div className="card p-4">
-                    <div className="flex items-center justify-between mb-3">
-                      <div className="flex items-center gap-2">
-                        <History size={13} style={{ color: 'var(--amber)' }} />
-                        <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--amber)' }}>
-                          Previous Version
-                        </span>
-                        <span className="text-[10px] px-1.5 py-0.5 rounded-full" style={{ background: 'var(--surface-2)', color: 'var(--text-3)' }}>
-                          {prevVersion.title}
-                        </span>
-                      </div>
-                      <button
-                        onClick={() => setShowPreviousVersion(false)}
-                        className="text-xs flex items-center gap-1 transition-colors"
-                        style={{ color: 'var(--text-3)' }}
-                      >
-                        <EyeOff size={11} />
-                        Hide
-                      </button>
-                    </div>
-                    <div className="rounded-lg overflow-hidden" style={{ border: '1px solid var(--border)' }}>
-                      <div className="relative w-full" style={{ paddingBottom: '56.25%' }}>
-                        <iframe
-                          src={prevEmbedUrl}
-                          className="absolute inset-0 w-full h-full"
-                          allow="autoplay; encrypted-media"
-                          allowFullScreen
-                        />
-                      </div>
-                    </div>
-                  </div>
+                  <VersionComparison
+                    currentVersion={{ id: submission.id, title: submission.title, created_at: submission.created_at, external_url: submission.external_url }}
+                    previousVersion={prevVersion}
+                    currentNotes={notes}
+                    onClose={() => setShowPreviousVersion(false)}
+                  />
                 )
               })()}
-
-              {/* Current Version label when comparing */}
-              {showPreviousVersion && submission.revision_of && (
-                <div className="flex items-center gap-2 -mb-3">
-                  <span className="text-xs font-semibold uppercase tracking-wider" style={{ color: 'var(--green)' }}>
-                    Current Version
-                  </span>
-                </div>
-              )}
 
               {/* Video Player */}
               {videoUrl && (
@@ -1089,7 +1142,9 @@ export default function ReviewPage() {
                           <div className="flex flex-col items-center gap-2">
                             <AlertCircle size={20} style={{ color: 'var(--red)' }} />
                             <p className="text-xs" style={{ color: 'var(--red)' }}>
-                              {transcriptError || 'Transcription failed'}
+                              {transcriptError
+                                || (submission.metadata as Record<string, unknown>)?.transcription_error as string
+                                || 'Transcription failed'}
                             </p>
                             <div className="flex gap-2">
                               <button onClick={handleGenerateTranscript} className="btn-secondary text-xs">
@@ -1598,6 +1653,110 @@ export default function ReviewPage() {
                     readOnly={isReviewed}
                     loading={actionLoading}
                   />
+                </div>
+              )}
+
+              {/* AI Pre-Check Card */}
+              {(spellingLoaded || (submission.metadata as Record<string, unknown>)?.deepgram_words) && (
+                <QCPreCheckCard
+                  spellingResults={spellingResults}
+                  deepgramWords={((submission.metadata as Record<string, unknown>)?.deepgram_words || []) as Array<{ word: string; start: number; end: number; confidence: number; punctuated_word?: string }>}
+                />
+              )}
+
+              {/* Video Info */}
+              {(videoInfo || videoInfoLoading || videoInfoError) && (
+                <div className="card p-4">
+                  <div className="flex items-center justify-between mb-3">
+                    <h3 className="text-xs font-medium uppercase tracking-wider flex items-center gap-1.5" style={{ color: 'var(--text-3)' }}>
+                      <Search size={13} />
+                      Video Info
+                    </h3>
+                    {videoInfo && !videoInfo.resolution_check.is_correct && (
+                      <span className="text-[10px] font-bold px-2 py-0.5 rounded-full" style={{
+                        background: 'rgba(239, 68, 68, 0.15)', color: 'var(--red)',
+                      }}>
+                        WRONG RESOLUTION
+                      </span>
+                    )}
+                  </div>
+
+                  {videoInfoLoading && (
+                    <div className="flex items-center gap-2 py-3">
+                      <Loader2 size={14} className="animate-spin" style={{ color: 'var(--text-3)' }} />
+                      <span className="text-xs" style={{ color: 'var(--text-3)' }}>Fetching video metadata...</span>
+                    </div>
+                  )}
+
+                  {videoInfoError && (
+                    <div className="text-xs py-2 flex items-center gap-1.5" style={{ color: 'var(--text-3)' }}>
+                      <AlertCircle size={12} />
+                      {videoInfoError}
+                      <button
+                        onClick={fetchVideoMetadata}
+                        className="underline ml-1"
+                        style={{ color: 'var(--blue)' }}
+                      >
+                        Retry
+                      </button>
+                    </div>
+                  )}
+
+                  {videoInfo && (
+                    <div className="space-y-2">
+                      {/* Resolution — primary focus */}
+                      <div
+                        className="rounded-lg p-3 text-center"
+                        style={{
+                          background: videoInfo.resolution_check.is_correct
+                            ? 'rgba(34, 197, 94, 0.08)' : 'rgba(239, 68, 68, 0.08)',
+                          border: videoInfo.resolution_check.is_correct
+                            ? '1px solid rgba(34, 197, 94, 0.25)' : '1px solid rgba(239, 68, 68, 0.3)',
+                        }}
+                      >
+                        <div className="text-lg font-bold" style={{
+                          color: videoInfo.resolution_check.is_correct ? 'var(--green)' : 'var(--red)',
+                        }}>
+                          {videoInfo.width} x {videoInfo.height}
+                        </div>
+                        <div className="text-[10px] mt-0.5" style={{ color: 'var(--text-3)' }}>
+                          {videoInfo.aspect_ratio} — {videoInfo.resolution_check.message}
+                        </div>
+                      </div>
+
+                      {/* Secondary details */}
+                      <dl className="space-y-1.5 pt-1">
+                        {videoInfo.duration_seconds > 0 && (
+                          <div className="flex items-center justify-between text-xs">
+                            <dt style={{ color: 'var(--text-3)' }}>Duration</dt>
+                            <dd className="font-medium" style={{ color: 'var(--text-2)' }}>
+                              {Math.floor(videoInfo.duration_seconds / 60)}m {videoInfo.duration_seconds % 60}s
+                            </dd>
+                          </div>
+                        )}
+                        {videoInfo.file_size_bytes > 0 && (
+                          <div className="flex items-center justify-between text-xs">
+                            <dt style={{ color: 'var(--text-3)' }}>File Size</dt>
+                            <dd className="font-medium" style={{ color: 'var(--text-2)' }}>
+                              {videoInfo.file_size_bytes > 1073741824
+                                ? `${(videoInfo.file_size_bytes / 1073741824).toFixed(1)} GB`
+                                : `${(videoInfo.file_size_bytes / 1048576).toFixed(1)} MB`}
+                            </dd>
+                          </div>
+                        )}
+                        <div className="flex items-center justify-between text-xs">
+                          <dt style={{ color: 'var(--text-3)' }}>Orientation</dt>
+                          <dd className="font-medium" style={{ color: 'var(--text-2)' }}>
+                            {videoInfo.is_portrait ? 'Portrait' : 'Landscape'}
+                            {' '}
+                            <span style={{ color: 'var(--text-3)' }}>
+                              (expected: {videoInfo.resolution_check.expected_orientation})
+                            </span>
+                          </dd>
+                        </div>
+                      </dl>
+                    </div>
+                  )}
                 </div>
               )}
 

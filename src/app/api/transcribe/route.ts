@@ -57,13 +57,21 @@ export async function POST(req: NextRequest) {
     // Fire webhook to Railway (fire-and-forget)
     const webhookSecret = process.env.TRANSCRIBE_WEBHOOK_SECRET || process.env.NEXT_PUBLIC_AGENT_WEBHOOK_SECRET || ''
 
+    // Build callback URL so Railway can send results back to us
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '')
+    const callbackUrl = appUrl ? `${appUrl}/api/webhook/transcription-complete` : undefined
+
     fetch(`${railwayUrl}/webhook/transcribe`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'x-webhook-secret': webhookSecret,
       },
-      body: JSON.stringify({ submission_id, file_id: fileId }),
+      body: JSON.stringify({
+        submission_id,
+        file_id: fileId,
+        ...(callbackUrl ? { callback_url: callbackUrl } : {}),
+      }),
     }).catch(err => {
       console.error('[transcribe] Failed to fire webhook to Railway:', err)
     })
