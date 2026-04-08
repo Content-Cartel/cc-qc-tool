@@ -85,6 +85,7 @@ export default function ReviewPage() {
   const { user, isPM } = useAuth()
   const submissionId = params.id as string
 
+
   const [submission, setSubmission] = useState<SubmissionDetail | null>(null)
   const [notes, setNotes] = useState<QCNote[]>([])
   const [existingChecklist, setExistingChecklist] = useState<QCChecklistResult | null>(null)
@@ -270,6 +271,7 @@ export default function ReviewPage() {
     if (submission) {
       fetchVideoMetadata()
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [submission?.id, fetchVideoMetadata])
 
   useEffect(() => {

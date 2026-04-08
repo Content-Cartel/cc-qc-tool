@@ -18,14 +18,14 @@ interface VersionInfo {
 interface VersionComparisonProps {
   currentVersion: VersionInfo
   previousVersion: VersionInfo
-  currentNotes: QCNote[]
+  currentNotes?: QCNote[]
   onClose: () => void
 }
 
 export default function VersionComparison({
   currentVersion,
   previousVersion,
-  currentNotes,
+  currentNotes: _currentNotes,
   onClose,
 }: VersionComparisonProps) {
   const supabase = createClient()

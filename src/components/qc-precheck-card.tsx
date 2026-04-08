@@ -1,7 +1,7 @@
 'use client'
 
 import React, { useMemo, useState } from 'react'
-import { ChevronDown, ChevronRight, AlertTriangle, CheckCircle2, Volume2, Type } from 'lucide-react'
+import { ChevronDown, ChevronRight, CheckCircle2, Volume2, Type } from 'lucide-react'
 import { analyzeAudioFromWords, getAudioSummary, type AudioIssue } from '@/lib/ai/audio-analyzer'
 
 interface SpellingResult {
