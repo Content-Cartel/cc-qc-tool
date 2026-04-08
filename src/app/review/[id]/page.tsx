@@ -282,7 +282,7 @@ export default function ReviewPage() {
     loadSpellingResults()
   }, [loadSpellingResults])
 
-  async function handleAddNote(note: string, timestampSeconds: number, category: NoteCategory) {
+  const handleAddNote = useCallback(async (note: string, timestampSeconds: number, category: NoteCategory) => {
     await supabase.from('qc_notes').insert({
       submission_id: submissionId,
       author_name: userName,
@@ -291,7 +291,7 @@ export default function ReviewPage() {
       category,
     })
     await loadNotes()
-  }
+  }, [supabase, submissionId, userName, loadNotes])
 
   async function handleAddGeneralNote() {
     if (!newNote.trim()) return
@@ -306,31 +306,31 @@ export default function ReviewPage() {
     await loadNotes()
   }
 
-  async function handleResolveNote(noteId: string) {
+  const handleResolveNote = useCallback(async (noteId: string) => {
     await supabase
       .from('qc_notes')
       .update({ is_resolved: true, resolved_at: new Date().toISOString() })
       .eq('id', noteId)
     await loadNotes()
-  }
+  }, [supabase, loadNotes])
 
-  async function handleEditNote(noteId: string, newText: string) {
+  const handleEditNote = useCallback(async (noteId: string, newText: string) => {
     await supabase
       .from('qc_notes')
       .update({ note: newText })
       .eq('id', noteId)
     await loadNotes()
-  }
+  }, [supabase, loadNotes])
 
-  async function handleDeleteNote(noteId: string) {
+  const handleDeleteNote = useCallback(async (noteId: string) => {
     await supabase
       .from('qc_notes')
       .delete()
       .eq('id', noteId)
     await loadNotes()
-  }
+  }, [supabase, loadNotes])
 
-  async function handleSaveAnnotation(imageDataUrl: string, timestampSeconds: number) {
+  const handleSaveAnnotation = useCallback(async (imageDataUrl: string, timestampSeconds: number) => {
     await supabase.from('qc_notes').insert({
       submission_id: submissionId,
       author_name: userName,
@@ -339,7 +339,7 @@ export default function ReviewPage() {
       category: 'creative' as NoteCategory,
     })
     await loadNotes()
-  }
+  }, [supabase, submissionId, userName, loadNotes])
 
   async function handleRunSpellingCheck() {
     if (!submission) return
@@ -616,17 +616,25 @@ export default function ReviewPage() {
           setTranscribing(false)
           return
         }
-        // Light query: only check transcript_status
+        // Light query: only check transcript_status + transcript text
         const { data } = await supabase
           .from('qc_submissions')
-          .select('transcript_status')
+          .select('transcript, transcript_status, metadata')
           .eq('id', submissionId)
           .single()
         if (data && (data.transcript_status === 'completed' || data.transcript_status === 'failed')) {
-          // Stop polling first, then reload once
+          // Stop polling first
           if (transcriptPollRef.current) clearInterval(transcriptPollRef.current)
           transcriptPollRef.current = null
-          await loadSubmission()
+          // Merge transcript fields into existing submission WITHOUT full reload
+          // This avoids re-mounting the video iframe
+          setSubmission(prev => prev ? {
+            ...prev,
+            transcript: data.transcript,
+            transcript_status: data.transcript_status as TranscriptStatus,
+            metadata: data.metadata as Record<string, unknown> | null,
+          } : prev)
+          setTranscribing(false)
         }
       }, 5000)
     } catch {

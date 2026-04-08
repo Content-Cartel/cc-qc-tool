@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef, useCallback } from 'react'
+import React, { useState, useRef, useCallback } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Play, Pause, MessageSquare, Check, Clock, Pencil, Trash2, X, PenTool } from 'lucide-react'
 import { NOTE_CATEGORIES } from '@/lib/constants'
@@ -48,7 +48,7 @@ const CATEGORY_COLORS: Record<string, string> = {
   other: 'var(--text-3)',
 }
 
-export default function VideoPlayerNotes({
+const VideoPlayerNotes = React.memo(function VideoPlayerNotes({
   url,
   notes,
   onAddNote,
@@ -498,4 +498,6 @@ export default function VideoPlayerNotes({
       )}
     </div>
   )
-}
+})
+
+export default VideoPlayerNotes
