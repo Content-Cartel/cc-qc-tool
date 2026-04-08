@@ -92,8 +92,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Failed to get Google access token' }, { status: 500 })
     }
 
-    // Download the file from Drive as a buffer
-    console.log(`[transcribe] Downloading file ${fileId} from Drive...`)
+    // Stream file from Drive directly to Deepgram (no buffering in memory)
+    console.log(`[transcribe] Streaming file ${fileId} from Drive to Deepgram...`)
+
     const driveRes = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
       headers: { Authorization: `Bearer ${token.token}` },
     })
@@ -104,17 +105,16 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: `Failed to download from Drive: ${driveRes.status}` }, { status: 500 })
     }
 
-    const audioBuffer = await driveRes.arrayBuffer()
-    console.log(`[transcribe] Downloaded ${(audioBuffer.byteLength / 1048576).toFixed(1)}MB, sending to Deepgram...`)
-
-    // Send to Deepgram
+    // Pipe the Drive response body directly to Deepgram — no arraybuffer needed
     const dgRes = await fetch('https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true&paragraphs=true&utterances=false&punctuate=true', {
       method: 'POST',
       headers: {
         Authorization: `Token ${deepgramKey}`,
-        'Content-Type': 'application/octet-stream',
+        'Content-Type': driveRes.headers.get('content-type') || 'application/octet-stream',
       },
-      body: audioBuffer,
+      body: driveRes.body,
+      // @ts-expect-error - duplex required for streaming request body
+      duplex: 'half',
     })
 
     if (!dgRes.ok) {
