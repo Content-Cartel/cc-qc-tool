@@ -1472,7 +1472,7 @@ export default function ReviewPage() {
               </div>
 
               {/* Editing Instructions (V2 Editorial Director) */}
-              {isPM && submission.transcript && submission.transcript_status === 'completed' && (
+              {isPM && (
                 <div className="card p-4 space-y-3">
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
@@ -1495,24 +1495,36 @@ export default function ReviewPage() {
 
                   {!editingInstructions ? (
                     <div className="space-y-2">
-                      <button
-                        onClick={handleGenerateEditingInstructions}
-                        disabled={generatingInstructions}
-                        className="w-full flex items-center justify-center gap-2 py-3 rounded-lg text-xs font-medium transition-all"
-                        style={{ background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(212, 168, 67, 0.1))', color: 'var(--text)', border: '1px solid var(--border)' }}
-                      >
-                        {generatingInstructions ? (
+                      {(() => {
+                        const transcriptReady = !!submission.transcript && submission.transcript_status === 'completed'
+                        return (
                           <>
-                            <Loader2 size={14} className="animate-spin" />
-                            Editorial Director is analyzing the transcript...
+                            <button
+                              onClick={handleGenerateEditingInstructions}
+                              disabled={generatingInstructions || !transcriptReady}
+                              className="w-full flex items-center justify-center gap-2 py-3 rounded-lg text-xs font-medium transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                              style={{ background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(212, 168, 67, 0.1))', color: 'var(--text)', border: '1px solid var(--border)' }}
+                            >
+                              {generatingInstructions ? (
+                                <>
+                                  <Loader2 size={14} className="animate-spin" />
+                                  Editorial Director is analyzing the transcript...
+                                </>
+                              ) : (
+                                <>
+                                  <Sparkles size={14} style={{ color: 'var(--gold)' }} />
+                                  Generate Editing Instructions
+                                </>
+                              )}
+                            </button>
+                            {!transcriptReady && !generatingInstructions && (
+                              <p className="text-[11px] text-center" style={{ color: 'var(--text-3)' }}>
+                                Generate the transcript first — editing instructions run on it.
+                              </p>
+                            )}
                           </>
-                        ) : (
-                          <>
-                            <Sparkles size={14} style={{ color: 'var(--gold)' }} />
-                            Generate Editing Instructions
-                          </>
-                        )}
-                      </button>
+                        )
+                      })()}
                       {instructionsError && (
                         <div className="flex items-start gap-2 p-2 rounded text-xs" style={{ background: 'rgba(239, 68, 68, 0.1)', color: 'var(--red)' }}>
                           <AlertCircle size={12} className="mt-0.5 flex-shrink-0" />
