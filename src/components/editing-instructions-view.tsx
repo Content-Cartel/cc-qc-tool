@@ -73,6 +73,37 @@ interface Blueprint {
   general_notes?: string[]
 }
 
+/**
+ * Parse a timestamp string into seconds for sorting.
+ * Accepts "M:SS", "MM:SS", "H:MM:SS", "45", or free-form quotes.
+ * Unparseable values return Infinity so they sort to the end.
+ */
+function parseTimestamp(value?: string | null): number {
+  if (!value) return Number.POSITIVE_INFINITY
+  const match = value.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/)
+  if (match) {
+    const a = parseInt(match[1], 10)
+    const b = parseInt(match[2], 10)
+    const c = match[3] ? parseInt(match[3], 10) : null
+    if (c !== null) return a * 3600 + b * 60 + c
+    return a * 60 + b
+  }
+  const plain = value.match(/^\s*(\d+(?:\.\d+)?)\s*s?\s*$/)
+  if (plain) return parseFloat(plain[1])
+  return Number.POSITIVE_INFINITY
+}
+
+function sortByTime<T>(items: T[] | undefined, key: (item: T) => string | undefined): T[] {
+  if (!items) return []
+  return [...items]
+    .map((item, originalIndex) => ({ item, originalIndex, seconds: parseTimestamp(key(item)) }))
+    .sort((a, b) => {
+      if (a.seconds !== b.seconds) return a.seconds - b.seconds
+      return a.originalIndex - b.originalIndex
+    })
+    .map(x => x.item)
+}
+
 function SectionHeader({ children }: { children: React.ReactNode }) {
   return (
     <h4
@@ -113,6 +144,11 @@ function Pill({ children, tone = 'default' }: { children: React.ReactNode; tone?
 
 export default function EditingInstructionsView({ blueprint }: { blueprint: Record<string, unknown> }) {
   const bp = blueprint as unknown as Blueprint
+
+  const sortedInstructions = sortByTime(bp.instructions, (i) => i.timestamp)
+  const sortedBroll = sortByTime(bp.broll_research, (b) => b.timestamp)
+  const sortedGraphics = sortByTime(bp.graphics_checklist, (g) => g.appears_at)
+  const sortedMusic = sortByTime(bp.music_timeline, (m) => m.when)
 
   return (
     <div
@@ -169,11 +205,11 @@ export default function EditingInstructionsView({ blueprint }: { blueprint: Reco
       )}
 
       {/* 3. Section-by-Section Blueprint */}
-      {bp.instructions && bp.instructions.length > 0 && (
+      {sortedInstructions.length > 0 && (
         <section className="space-y-2">
-          <SectionHeader>3. Section-by-Section Blueprint ({bp.instructions.length})</SectionHeader>
+          <SectionHeader>3. Section-by-Section Blueprint ({sortedInstructions.length})</SectionHeader>
           <div className="space-y-2">
-            {bp.instructions.map((inst, i) => (
+            {sortedInstructions.map((inst, i) => (
               <div
                 key={i}
                 className="p-2 rounded space-y-1"
@@ -198,11 +234,11 @@ export default function EditingInstructionsView({ blueprint }: { blueprint: Reco
       )}
 
       {/* 4. B-Roll Research */}
-      {bp.broll_research && bp.broll_research.length > 0 && (
+      {sortedBroll.length > 0 && (
         <section className="space-y-2">
-          <SectionHeader>4. B-Roll Research ({bp.broll_research.length})</SectionHeader>
+          <SectionHeader>4. B-Roll Research ({sortedBroll.length})</SectionHeader>
           <div className="space-y-2">
-            {bp.broll_research.map((b, i) => (
+            {sortedBroll.map((b, i) => (
               <div
                 key={i}
                 className="p-2 rounded space-y-1"
@@ -235,11 +271,11 @@ export default function EditingInstructionsView({ blueprint }: { blueprint: Reco
       )}
 
       {/* 5. Graphics Checklist */}
-      {bp.graphics_checklist && bp.graphics_checklist.length > 0 && (
+      {sortedGraphics.length > 0 && (
         <section className="space-y-2">
-          <SectionHeader>5. Graphics &amp; Overlays ({bp.graphics_checklist.length})</SectionHeader>
+          <SectionHeader>5. Graphics &amp; Overlays ({sortedGraphics.length})</SectionHeader>
           <div className="space-y-2">
-            {bp.graphics_checklist.map((g, i) => (
+            {sortedGraphics.map((g, i) => (
               <div
                 key={i}
                 className="p-2 rounded space-y-1"
@@ -271,11 +307,11 @@ export default function EditingInstructionsView({ blueprint }: { blueprint: Reco
       )}
 
       {/* 6. Music Timeline */}
-      {bp.music_timeline && bp.music_timeline.length > 0 && (
+      {sortedMusic.length > 0 && (
         <section className="space-y-2">
-          <SectionHeader>6. Music &amp; Audio Timeline ({bp.music_timeline.length})</SectionHeader>
+          <SectionHeader>6. Music &amp; Audio Timeline ({sortedMusic.length})</SectionHeader>
           <div className="space-y-2">
-            {bp.music_timeline.map((m, i) => (
+            {sortedMusic.map((m, i) => (
               <div
                 key={i}
                 className="p-2 rounded space-y-1"
