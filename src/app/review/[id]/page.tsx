@@ -14,6 +14,7 @@ import VideoPlayerNotes from '@/components/video-player-notes'
 import BrandReference from '@/components/brand-reference'
 import QCPreCheckCard from '@/components/qc-precheck-card'
 import VersionComparison from '@/components/version-comparison'
+import EditingInstructionsView from '@/components/editing-instructions-view'
 import { createClient } from '@/lib/supabase/client'
 import { useAuth } from '@/hooks/use-auth'
 import { timeAgo, formatDateTime } from '@/lib/utils/date'
@@ -116,6 +117,12 @@ export default function ReviewPage() {
   const [postGenSource, setPostGenSource] = useState<{ type: 'submission' | 'client'; id: string; title: string } | null>(null)
   const [postsSaved, setPostsSaved] = useState(false)
   const [postsCopied, setPostsCopied] = useState(false)
+  // Editing Instructions (V2 Editorial Director) state
+  const [generatingInstructions, setGeneratingInstructions] = useState(false)
+  const [instructionsError, setInstructionsError] = useState<string | null>(null)
+  const [editingInstructions, setEditingInstructions] = useState<Record<string, unknown> | null>(null)
+  const [instructionsCopied, setInstructionsCopied] = useState(false)
+  const [instructionsExpanded, setInstructionsExpanded] = useState(true)
   // Spelling check state
   const [spellingChecking, setSpellingChecking] = useState(false)
   const [spellingError, setSpellingError] = useState<string | null>(null)
@@ -155,6 +162,12 @@ export default function ReviewPage() {
         client_name: (data as unknown as { clients?: { name: string } }).clients?.name || 'Unknown',
       } as SubmissionDetail
       setSubmission(sub)
+
+      // Seed editing instructions from the submission row (may be null)
+      const savedInstructions = (data as unknown as { editing_instructions?: Record<string, unknown> | null }).editing_instructions
+      if (savedInstructions && typeof savedInstructions === 'object') {
+        setEditingInstructions(savedInstructions)
+      }
 
       // Fetch version history if this is part of a revision chain
       const rootId = sub.revision_of || sub.id
@@ -765,6 +778,68 @@ export default function ReviewPage() {
     navigator.clipboard.writeText(generatedPosts)
     setPostsCopied(true)
     setTimeout(() => setPostsCopied(false), 2000)
+  }
+
+  async function handleGenerateEditingInstructions() {
+    if (!submission) return
+    setGeneratingInstructions(true)
+    setInstructionsError(null)
+
+    try {
+      const res = await fetch('/api/content/generate-editing-instructions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ submission_id: submissionId }),
+      })
+
+      if (!res.ok) {
+        const err = await res.json()
+        setInstructionsError(err.error || 'Generation failed')
+        setGeneratingInstructions(false)
+        return
+      }
+
+      const reader = res.body?.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      if (reader) {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const segments = buffer.split('\n\n')
+          buffer = segments.pop() || ''
+
+          for (const segment of segments) {
+            if (segment.startsWith('data: ')) {
+              try {
+                const event = JSON.parse(segment.slice(6))
+                if (event.type === 'done' && event.blueprint) {
+                  setEditingInstructions(event.blueprint as Record<string, unknown>)
+                  setInstructionsExpanded(true)
+                } else if (event.type === 'error') {
+                  setInstructionsError(event.message || 'Generation failed')
+                }
+              } catch {
+                // skip malformed
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      setInstructionsError('Network error — please try again.')
+    } finally {
+      setGeneratingInstructions(false)
+    }
+  }
+
+  function handleCopyInstructions() {
+    if (!editingInstructions) return
+    navigator.clipboard.writeText(JSON.stringify(editingInstructions, null, 2))
+    setInstructionsCopied(true)
+    setTimeout(() => setInstructionsCopied(false), 2000)
   }
 
   if (loading) {
@@ -1395,6 +1470,83 @@ export default function ReviewPage() {
                   </>
                 )}
               </div>
+
+              {/* Editing Instructions (V2 Editorial Director) */}
+              {isPM && submission.transcript && submission.transcript_status === 'completed' && (
+                <div className="card p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Sparkles size={14} style={{ color: 'var(--gold)' }} />
+                      <h3 className="text-xs font-medium uppercase tracking-wider" style={{ color: 'var(--text-3)' }}>
+                        Editing Instructions
+                      </h3>
+                    </div>
+                    {editingInstructions && (
+                      <button
+                        onClick={() => setInstructionsExpanded(v => !v)}
+                        className="text-[10px] flex items-center gap-1 px-2 py-1 rounded transition-colors"
+                        style={{ color: 'var(--text-3)', background: 'var(--surface-2)' }}
+                      >
+                        {instructionsExpanded ? <EyeOff size={10} /> : <Eye size={10} />}
+                        {instructionsExpanded ? 'Collapse' : 'Expand'}
+                      </button>
+                    )}
+                  </div>
+
+                  {!editingInstructions ? (
+                    <div className="space-y-2">
+                      <button
+                        onClick={handleGenerateEditingInstructions}
+                        disabled={generatingInstructions}
+                        className="w-full flex items-center justify-center gap-2 py-3 rounded-lg text-xs font-medium transition-all"
+                        style={{ background: 'linear-gradient(135deg, rgba(99, 102, 241, 0.1), rgba(212, 168, 67, 0.1))', color: 'var(--text)', border: '1px solid var(--border)' }}
+                      >
+                        {generatingInstructions ? (
+                          <>
+                            <Loader2 size={14} className="animate-spin" />
+                            Editorial Director is analyzing the transcript...
+                          </>
+                        ) : (
+                          <>
+                            <Sparkles size={14} style={{ color: 'var(--gold)' }} />
+                            Generate Editing Instructions
+                          </>
+                        )}
+                      </button>
+                      {instructionsError && (
+                        <div className="flex items-start gap-2 p-2 rounded text-xs" style={{ background: 'rgba(239, 68, 68, 0.1)', color: 'var(--red)' }}>
+                          <AlertCircle size={12} className="mt-0.5 flex-shrink-0" />
+                          <span>{instructionsError}</span>
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={handleCopyInstructions}
+                          className="btn-secondary text-xs flex items-center gap-1.5 flex-1"
+                        >
+                          {instructionsCopied ? <Check size={12} style={{ color: 'var(--green)' }} /> : <Copy size={12} />}
+                          {instructionsCopied ? 'Copied JSON' : 'Copy JSON'}
+                        </button>
+                        <button
+                          onClick={handleGenerateEditingInstructions}
+                          disabled={generatingInstructions}
+                          className="btn-secondary text-xs flex items-center gap-1.5"
+                        >
+                          {generatingInstructions ? <Loader2 size={12} className="animate-spin" /> : <RefreshCw size={12} />}
+                          {generatingInstructions ? 'Regenerating...' : 'Regenerate'}
+                        </button>
+                      </div>
+
+                      {instructionsExpanded && (
+                        <EditingInstructionsView blueprint={editingInstructions} />
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
 
               {/* Post Generator */}
               {isPM && (submission.transcript || clientTranscripts.length > 0) && (
