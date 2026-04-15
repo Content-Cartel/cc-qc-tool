@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { motion } from 'framer-motion'
-import { UserPlus, Users, Link2, Trash2, Shield, Briefcase, Pencil, Check, X, Loader2 } from 'lucide-react'
+import { UserPlus, Users, Link2, Trash2, Shield, Briefcase, Pencil, Check, X, Loader2, Key, Copy } from 'lucide-react'
 import Nav from '@/components/nav'
 import { useAuth } from '@/hooks/use-supabase-auth'
 import { createClient } from '@/lib/supabase/client'
@@ -39,6 +39,11 @@ export default function AdminPage() {
   const [assignEditorId, setAssignEditorId] = useState('')
   const [assignClientId, setAssignClientId] = useState<number | ''>('')
   const [assigning, setAssigning] = useState(false)
+
+  // Activate user (set temp password)
+  const [activatingId, setActivatingId] = useState<string | null>(null)
+  const [activatedCreds, setActivatedCreds] = useState<{ email: string; password: string; name: string } | null>(null)
+  const [copied, setCopied] = useState(false)
 
   const loadData = useCallback(async () => {
     setLoading(true)
@@ -111,6 +116,40 @@ export default function AdminPage() {
   const handleRemoveAssignment = async (id: string) => {
     await supabase.from('editor_assignments').delete().eq('id', id)
     loadData()
+  }
+
+  const handleActivate = async (profile: Profile) => {
+    if (!confirm(`Set a temporary password for ${profile.display_name}? This will overwrite any existing password.`)) return
+    setActivatingId(profile.id)
+    try {
+      const res = await fetch('/api/admin/set-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id: profile.id }),
+      })
+      const data = await res.json()
+      if (!res.ok) {
+        alert(data.error || 'Failed to set password')
+      } else {
+        setActivatedCreds({
+          email: data.email || profile.email || '',
+          password: data.password,
+          name: profile.display_name,
+        })
+        setCopied(false)
+      }
+    } catch {
+      alert('Something went wrong')
+    }
+    setActivatingId(null)
+  }
+
+  const copyCredentials = async () => {
+    if (!activatedCreds) return
+    const text = `Email: ${activatedCreds.email}\nPassword: ${activatedCreds.password}\n\nLog in at: https://qc.contentcartel.net/login`
+    await navigator.clipboard.writeText(text)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
   }
 
   if (authLoading || loading) {
@@ -299,6 +338,16 @@ export default function AdminPage() {
                         </div>
                       )}
                       <span className={`badge badge-${roleColor} text-xs`}>{roleLabel}</span>
+                      <button
+                        onClick={() => handleActivate(p)}
+                        disabled={activatingId === p.id}
+                        className="p-1.5 rounded-md transition-colors hover:bg-[var(--surface)] disabled:opacity-50"
+                        title="Set temporary password (activate user without email)"
+                      >
+                        {activatingId === p.id
+                          ? <Loader2 size={12} className="animate-spin" style={{ color: 'var(--gold)' }} />
+                          : <Key size={12} style={{ color: 'var(--gold)' }} />}
+                      </button>
                     </div>
                   </div>
                 )
@@ -343,6 +392,67 @@ export default function AdminPage() {
             )}
           </div>
         </motion.div>
+
+        {/* Credentials Modal */}
+        {activatedCreds && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            style={{ background: 'rgba(0,0,0,0.7)' }}
+            onClick={() => setActivatedCreds(null)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="card p-6 max-w-md w-full"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center gap-2 mb-3">
+                <Key size={16} style={{ color: 'var(--gold)' }} />
+                <h2 className="text-sm font-semibold" style={{ color: 'var(--text)' }}>
+                  Credentials for {activatedCreds.name}
+                </h2>
+              </div>
+              <p className="text-xs mb-4" style={{ color: 'var(--text-3)' }}>
+                Copy and share these credentials with the user via Slack or DM. This password will not be shown again.
+              </p>
+              <div className="space-y-2 mb-4">
+                <div>
+                  <label className="label">Email</label>
+                  <div
+                    className="px-3 py-2 rounded-md text-sm font-mono"
+                    style={{ background: 'var(--surface-2)', color: 'var(--text)' }}
+                  >
+                    {activatedCreds.email}
+                  </div>
+                </div>
+                <div>
+                  <label className="label">Temporary Password</label>
+                  <div
+                    className="px-3 py-2 rounded-md text-sm font-mono select-all"
+                    style={{ background: 'var(--surface-2)', color: 'var(--gold)' }}
+                  >
+                    {activatedCreds.password}
+                  </div>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={copyCredentials}
+                  className="btn-primary flex-1 text-sm flex items-center justify-center gap-2"
+                >
+                  {copied ? <><Check size={14} /> Copied</> : <><Copy size={14} /> Copy full message</>}
+                </button>
+                <button
+                  onClick={() => setActivatedCreds(null)}
+                  className="px-4 py-2 rounded-md text-sm transition-colors hover:bg-[var(--surface-2)]"
+                  style={{ color: 'var(--text-3)' }}
+                >
+                  Close
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
       </main>
     </div>
   )
