@@ -6,7 +6,7 @@ import { motion } from 'framer-motion'
 import { CheckCircle, Upload } from 'lucide-react'
 import Nav from '@/components/nav'
 import { createClient } from '@/lib/supabase/client'
-import { useAuth } from '@/hooks/use-auth'
+import { useAuth } from '@/hooks/use-supabase-auth'
 import type { ContentType } from '@/lib/supabase/types'
 import { notifyAgent } from '@/lib/notify-agent'
 
@@ -33,7 +33,7 @@ export default function SubmitPage() {
 
 function SubmitForm() {
   const supabase = createClient()
-  const { user } = useAuth()
+  const { user, userId, isPM } = useAuth()
   const searchParams = useSearchParams()
   const revisionOf = searchParams.get('revision_of')
 
@@ -49,13 +49,30 @@ function SubmitForm() {
   const [error, setError] = useState('')
 
   const loadClients = useCallback(async () => {
-    const { data } = await supabase
-      .from('clients')
-      .select('id, name, phase')
-      .in('phase', ['production', 'active', 'onboarding'])
-      .order('name')
-    setClients(data || [])
-  }, [supabase])
+    if (isPM) {
+      // PM/Admin see all active clients
+      const { data } = await supabase
+        .from('clients')
+        .select('id, name, phase')
+        .in('phase', ['production', 'active', 'onboarding'])
+        .order('name')
+      setClients(data || [])
+    } else if (userId) {
+      // Editors only see clients assigned to them
+      const { data: assignments } = await supabase
+        .from('editor_assignments')
+        .select('client_id, clients(id, name, phase)')
+        .eq('editor_id', userId)
+
+      if (assignments) {
+        const assignedClients = assignments
+          .map((a: Record<string, unknown>) => (a as unknown as { clients: ClientOption }).clients)
+          .filter(Boolean)
+          .sort((a: ClientOption, b: ClientOption) => a.name.localeCompare(b.name))
+        setClients(assignedClients)
+      }
+    }
+  }, [supabase, isPM, userId])
 
   // If resubmitting, load original submission data
   useEffect(() => {

@@ -1,4 +1,5 @@
-export type UserRole = 'editor' | 'pm' | 'admin'
+export type UserRole = 'editor' | 'pm' | 'admin'  // Legacy — kept for backward compat
+export type AppRole = 'editor' | 'production_manager' | 'admin'
 export type ContentType = 'lf_video' | 'sf_video'
 export type SubmissionStatus = 'pending' | 'in_review' | 'approved' | 'revision_requested' | 'resubmitted' | 'follow_up'
 export type NoteCategory = 'brand' | 'technical' | 'creative' | 'copy' | 'audio' | 'other' | 'client_feedback'
@@ -87,4 +88,72 @@ export interface PipelineStage {
   completed_at: string | null
   completed_by: string | null
   notes: string | null
+}
+
+// ============================================================================
+// Auth & Profiles (v8)
+// ============================================================================
+
+export interface Profile {
+  id: string
+  display_name: string
+  email: string | null
+  role: AppRole
+  slack_user_id: string | null
+  avatar_url: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface EditorAssignment {
+  id: string
+  editor_id: string
+  client_id: number
+  assigned_by: string | null
+  assigned_at: string
+  // Joined
+  profiles?: { display_name: string } | null
+  clients?: { name: string } | null
+}
+
+// ============================================================================
+// Tasks (v8)
+// ============================================================================
+
+export type TaskContentType = 'long_form' | 'short_form'
+export type TaskStatus = 'queued' | 'in_progress' | 'in_review' | 'revision_needed' | 'approved'
+export type TaskPriority = 'low' | 'normal' | 'high' | 'urgent'
+
+export interface Task {
+  id: string
+  client_id: number
+  editor_id: string | null
+  created_by: string
+  title: string
+  content_type: TaskContentType
+  status: TaskStatus
+  priority: TaskPriority
+  deadline: string
+  source_file_url: string | null
+  editing_instructions: string | null
+  notes: string | null
+  completed_at: string | null
+  created_at: string
+  updated_at: string
+  // Joined
+  clients?: { name: string } | null
+  client_name?: string
+  profiles?: { display_name: string } | null
+  editor_name?: string
+}
+
+export interface TaskActivityLog {
+  id: string
+  task_id: string
+  actor_id: string | null
+  action: string
+  old_value: string | null
+  new_value: string | null
+  metadata: Record<string, unknown> | null
+  created_at: string
 }

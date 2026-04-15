@@ -3,12 +3,12 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { motion } from 'framer-motion'
-import type { UserRole } from '@/lib/supabase/types'
+import { createClient } from '@/lib/supabase/client'
 
 export default function LoginPage() {
   const router = useRouter()
-  const [name, setName] = useState('')
-  const [role, setRole] = useState<UserRole>('editor')
+  const supabase = createClient()
+  const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -18,39 +18,55 @@ export default function LoginPage() {
     setError('')
     setLoading(true)
 
-    const validPasswords: Record<string, UserRole[]> = {
-      'ccqc2024': ['editor', 'pm', 'admin'],
-      'ccpm2024': ['pm', 'admin'],
-    }
+    try {
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password,
+      })
 
-    let authenticated = false
-    for (const [pwd, roles] of Object.entries(validPasswords)) {
-      if (password === pwd && roles.includes(role)) {
-        authenticated = true
-        break
+      if (signInError) {
+        setError(signInError.message === 'Invalid login credentials'
+          ? 'Invalid email or password'
+          : signInError.message
+        )
+        setLoading(false)
+        return
       }
-    }
 
-    if (!authenticated) {
-      setError('Invalid password or role')
+      // Fetch profile to determine redirect
+      const { data: { user } } = await supabase.auth.getUser()
+      if (!user) {
+        setError('Authentication failed')
+        setLoading(false)
+        return
+      }
+
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('role')
+        .eq('id', user.id)
+        .single()
+
+      if (!profile) {
+        setError('Profile not found. Contact an admin.')
+        setLoading(false)
+        return
+      }
+
+      // Check for redirect param
+      const params = new URLSearchParams(window.location.search)
+      const redirect = params.get('redirect')
+
+      if (redirect) {
+        router.push(redirect)
+      } else if (profile.role === 'production_manager' || profile.role === 'admin') {
+        router.push('/dashboard')
+      } else {
+        router.push('/tasks')
+      }
+    } catch {
+      setError('Something went wrong. Please try again.')
       setLoading(false)
-      return
-    }
-
-    if (!name.trim()) {
-      setError('Please enter your name')
-      setLoading(false)
-      return
-    }
-
-    localStorage.setItem('qc_user', name.trim())
-    localStorage.setItem('qc_role', role)
-    localStorage.setItem('qc_auth', 'true')
-
-    if (role === 'pm' || role === 'admin') {
-      router.push('/dashboard')
-    } else {
-      router.push('/submit')
     }
   }
 
@@ -77,27 +93,16 @@ export default function LoginPage() {
 
           <form onSubmit={handleLogin} className="space-y-4">
             <div>
-              <label className="label">Name</label>
+              <label className="label">Email</label>
               <input
-                type="text"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
                 className="input"
-                placeholder="Your name"
+                placeholder="you@contentcartel.net"
                 required
+                autoComplete="email"
               />
-            </div>
-
-            <div>
-              <label className="label">Role</label>
-              <select
-                value={role}
-                onChange={(e) => setRole(e.target.value as UserRole)}
-                className="input"
-              >
-                <option value="editor">Editor</option>
-                <option value="pm">Production Manager</option>
-              </select>
             </div>
 
             <div>
@@ -109,6 +114,7 @@ export default function LoginPage() {
                 className="input"
                 placeholder="Enter password"
                 required
+                autoComplete="current-password"
               />
             </div>
 

@@ -3,21 +3,26 @@
 import Link from 'next/link'
 import Image from 'next/image'
 import { usePathname } from 'next/navigation'
-import { useAuth } from '@/hooks/use-auth'
-import { LayoutDashboard, Upload, FileCheck, GitBranch, LogOut, Dna } from 'lucide-react'
+import { useAuth } from '@/hooks/use-supabase-auth'
+import { LayoutDashboard, Upload, FileCheck, GitBranch, LogOut, Dna, ListTodo, Settings } from 'lucide-react'
 import NotificationDropdown from '@/components/notification-dropdown'
 
 export default function Nav() {
   const pathname = usePathname()
-  const { user, role, isPM, logout } = useAuth()
+  const { user, role, isPM, isAdmin, logout } = useAuth()
+
+  const roleLabel = role === 'production_manager' ? 'PM' : role === 'admin' ? 'Admin' : 'Editor'
 
   const navItems = isPM
     ? [
         { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+        { href: '/tasks/pm', label: 'Tasks', icon: ListTodo },
         { href: '/pipeline', label: 'Pipeline', icon: GitBranch },
         { href: '/dna', label: 'DNA', icon: Dna },
+        ...(isAdmin ? [{ href: '/admin', label: 'Admin', icon: Settings }] : []),
       ]
     : [
+        { href: '/tasks', label: 'Tasks', icon: ListTodo },
         { href: '/submit', label: 'Submit', icon: Upload },
         { href: '/my-submissions', label: 'My Work', icon: FileCheck },
       ]
@@ -28,7 +33,7 @@ export default function Nav() {
         <div className="flex justify-between h-12">
           <div className="flex items-center gap-6">
             {/* Logo */}
-            <Link href={isPM ? '/dashboard' : '/submit'} className="flex items-center gap-1.5">
+            <Link href={isPM ? '/dashboard' : '/tasks'} className="flex items-center gap-1.5">
               <Image
                 src="/cc-logo.png"
                 alt="Content Cartel"
@@ -43,7 +48,7 @@ export default function Nav() {
             <div className="flex items-center gap-0.5">
               {navItems.map((item) => {
                 const Icon = item.icon
-                const isActive = pathname === item.href
+                const isActive = pathname === item.href || pathname.startsWith(item.href + '/')
                 return (
                   <Link
                     key={item.href}
@@ -68,7 +73,7 @@ export default function Nav() {
             <span className="text-xs" style={{ color: 'var(--text-3)' }}>
               {user}
             </span>
-            <span className="badge badge-neutral text-xs">{role}</span>
+            <span className="badge badge-neutral text-xs">{roleLabel}</span>
             <button
               onClick={logout}
               className="p-1.5 rounded-md transition-colors hover:bg-[var(--surface-2)]"

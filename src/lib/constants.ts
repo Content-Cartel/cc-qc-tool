@@ -56,3 +56,43 @@ export const NOTE_CATEGORIES = [
   { key: 'other', label: 'Other' },
   { key: 'client_feedback', label: 'Client Feedback' },
 ] as const
+
+// ============================================================================
+// Task Tracker (v8)
+// ============================================================================
+
+export const TASK_STATUS_CONFIG = {
+  queued: { label: 'Queued', color: 'blue', icon: 'Clock' },
+  in_progress: { label: 'In Progress', color: 'amber', icon: 'Play' },
+  in_review: { label: 'In Review', color: 'purple', icon: 'Eye' },
+  revision_needed: { label: 'Revision Needed', color: 'red', icon: 'RotateCcw' },
+  approved: { label: 'Approved', color: 'green', icon: 'CheckCircle' },
+} as const
+
+export type TaskStatusKey = keyof typeof TASK_STATUS_CONFIG
+
+export const TASK_PRIORITY_CONFIG = {
+  low: { label: 'Low', color: 'neutral', icon: 'ArrowDown' },
+  normal: { label: 'Normal', color: 'blue', icon: 'Minus' },
+  high: { label: 'High', color: 'amber', icon: 'ArrowUp' },
+  urgent: { label: 'Urgent', color: 'red', icon: 'AlertTriangle' },
+} as const
+
+export type TaskPriorityKey = keyof typeof TASK_PRIORITY_CONFIG
+
+export const TASK_CONTENT_TYPE_CONFIG = {
+  long_form: { label: 'Long Form', color: 'gold' },
+  short_form: { label: 'Short Form', color: 'purple' },
+} as const
+
+// Kanban columns for editor view (cannot drag to approved)
+export const EDITOR_KANBAN_COLUMNS = ['queued', 'in_progress', 'in_review'] as const
+// Kanban columns for PM view (full access)
+export const PM_KANBAN_COLUMNS = ['queued', 'in_progress', 'in_review', 'revision_needed', 'approved'] as const
+
+// Deadline thresholds (in hours)
+export const DEADLINE_THRESHOLDS = {
+  GREEN: 12,   // > 12 hours remaining
+  YELLOW: 4,   // 4-12 hours remaining
+  RED: 0,      // < 4 hours remaining (or overdue)
+} as const

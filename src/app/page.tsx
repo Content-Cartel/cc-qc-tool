@@ -2,23 +2,40 @@
 
 import { useEffect } from 'react'
 import { useRouter } from 'next/navigation'
+import { createClient } from '@/lib/supabase/client'
 
 export default function Home() {
   const router = useRouter()
 
   useEffect(() => {
-    const storedRole = localStorage.getItem('qc_role')
-    const storedUser = localStorage.getItem('qc_user')
+    const redirect = async () => {
+      const supabase = createClient()
+      const { data: { user } } = await supabase.auth.getUser()
 
-    if (storedRole && storedUser) {
-      if (storedRole === 'pm' || storedRole === 'admin') {
+      if (!user) {
+        router.push('/login')
+        return
+      }
+
+      const { data: profile } = await supabase
+        .from('profiles')
+        .select('role')
+        .eq('id', user.id)
+        .single()
+
+      if (!profile) {
+        router.push('/login')
+        return
+      }
+
+      if (profile.role === 'production_manager' || profile.role === 'admin') {
         router.push('/dashboard')
       } else {
-        router.push('/submit')
+        router.push('/tasks')
       }
-    } else {
-      router.push('/login')
     }
+
+    redirect()
   }, [router])
 
   return (

@@ -9,7 +9,7 @@ import { StatusBadge, ContentTypeBadge } from '@/components/status-badge'
 import { PIPELINE_STAGES } from '@/lib/constants'
 import type { PipelineStageKey } from '@/lib/constants'
 import { createClient } from '@/lib/supabase/client'
-import { useAuth } from '@/hooks/use-auth'
+import { useAuth } from '@/hooks/use-supabase-auth'
 import { timeAgo } from '@/lib/utils/date'
 import type { QCSubmission } from '@/lib/supabase/types'
 

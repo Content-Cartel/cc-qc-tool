@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import Link from 'next/link'
 import { Bell, Check, X } from 'lucide-react'
 import { createClient } from '@/lib/supabase/client'
-import { useAuth } from '@/hooks/use-auth'
+import { useAuth } from '@/hooks/use-supabase-auth'
 import { timeAgo } from '@/lib/utils/date'
 import type { Notification } from '@/lib/supabase/types'
 
