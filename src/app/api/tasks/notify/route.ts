@@ -6,10 +6,14 @@ import {
   notifyRevisionRequested,
 } from '@/lib/slack'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_ROLE_KEY!
-)
+export const dynamic = 'force-dynamic'
+
+function getSupabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY!
+  )
+}
 
 /**
  * Internal API route for triggering Slack notifications on task events.
@@ -20,6 +24,7 @@ const supabase = createClient(
  */
 export async function POST(req: NextRequest) {
   try {
+    const supabase = getSupabase()
     const { type, task_id } = await req.json()
 
     if (!type || !task_id) {
