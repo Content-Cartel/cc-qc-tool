@@ -48,6 +48,31 @@ export async function POST(req: NextRequest) {
       )
     }
 
+    // Guard 1: reject self-invite (prevents admin from accidentally
+    // downgrading themselves by typing their own email in the form)
+    if (email.toLowerCase() === user.email?.toLowerCase()) {
+      return NextResponse.json(
+        { error: 'You cannot invite your own email. Your account already exists.' },
+        { status: 400 }
+      )
+    }
+
+    // Guard 2: reject re-invite of an existing user (prevents
+    // raw_user_meta_data clobber which silently overwrites the target's role)
+    const { data: existing } = await supabaseAdmin
+      .from('profiles')
+      .select('id, display_name')
+      .eq('email', email.toLowerCase())
+      .maybeSingle()
+    if (existing) {
+      return NextResponse.json(
+        {
+          error: `User ${existing.display_name} already exists. Use the key icon (🔑) in the Team Members list to set their password instead of re-inviting.`,
+        },
+        { status: 400 }
+      )
+    }
+
     // Invite user via Supabase Auth admin API
     // This sends them an email with a link to set their password
     const { data, error } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, {
