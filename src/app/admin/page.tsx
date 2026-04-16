@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { motion } from 'framer-motion'
-import { UserPlus, Users, Link2, Shield, Check, X, Loader2, Key, Copy } from 'lucide-react'
+import { UserPlus, Users, Link2, Shield, Check, X, Loader2, Key, Copy, AlertCircle, RefreshCw } from 'lucide-react'
 import Nav from '@/components/nav'
 import { useAuth } from '@/hooks/use-supabase-auth'
 import { createClient } from '@/lib/supabase/client'
@@ -26,6 +26,7 @@ export default function AdminPage() {
   const [assignments, setAssignments] = useState<AssignmentWithJoins[]>([])
   const [clients, setClients] = useState<ClientOption[]>([])
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
 
   // Invite form
   const [inviteEmail, setInviteEmail] = useState('')
@@ -47,15 +48,28 @@ export default function AdminPage() {
 
   const loadData = useCallback(async () => {
     setLoading(true)
-    const [profilesRes, assignmentsRes, clientsRes] = await Promise.all([
-      supabase.from('profiles').select('*').order('display_name'),
-      supabase.from('editor_assignments').select('*, profiles(display_name), clients(name)').order('assigned_at', { ascending: false }),
-      supabase.from('clients').select('id, name').in('phase', ['production', 'active', 'onboarding']).order('name'),
-    ])
-    setProfiles((profilesRes.data || []) as Profile[])
-    setAssignments((assignmentsRes.data || []) as AssignmentWithJoins[])
-    setClients((clientsRes.data || []) as ClientOption[])
-    setLoading(false)
+    setLoadError(null)
+    try {
+      const [profilesRes, assignmentsRes, clientsRes] = await Promise.all([
+        supabase.from('profiles').select('*').order('display_name'),
+        supabase.from('editor_assignments').select('*, profiles(display_name), clients(name)').order('assigned_at', { ascending: false }),
+        supabase.from('clients').select('id, name').in('phase', ['production', 'active', 'onboarding']).order('name'),
+      ])
+      // Surface the first non-RLS error if any query failed
+      const firstError = profilesRes.error || assignmentsRes.error || clientsRes.error
+      if (firstError) {
+        console.error('Admin loadData error:', firstError)
+        setLoadError(firstError.message || 'Failed to load admin data')
+      }
+      setProfiles((profilesRes.data || []) as Profile[])
+      setAssignments((assignmentsRes.data || []) as AssignmentWithJoins[])
+      setClients((clientsRes.data || []) as ClientOption[])
+    } catch (err) {
+      console.error('Admin loadData threw:', err)
+      setLoadError(err instanceof Error ? err.message : 'Unknown error loading admin data')
+    } finally {
+      setLoading(false)
+    }
   }, [supabase])
 
   useEffect(() => {
@@ -189,6 +203,22 @@ export default function AdminPage() {
         <Nav />
         <main className="max-w-4xl mx-auto px-4 py-8">
           <div className="card p-6 animate-shimmer h-64" />
+        </main>
+      </div>
+    )
+  }
+
+  if (loadError) {
+    return (
+      <div className="min-h-screen" style={{ background: 'var(--bg)' }}>
+        <Nav />
+        <main className="max-w-4xl mx-auto px-4 py-8 text-center">
+          <AlertCircle size={32} style={{ color: 'var(--red)' }} className="mx-auto mb-3" />
+          <h1 className="text-lg font-bold mb-1" style={{ color: 'var(--text)' }}>Couldn&rsquo;t load admin data</h1>
+          <p className="text-xs mb-4" style={{ color: 'var(--text-3)' }}>{loadError}</p>
+          <button onClick={loadData} className="btn-primary text-sm inline-flex items-center gap-1.5">
+            <RefreshCw size={12} /> Retry
+          </button>
         </main>
       </div>
     )

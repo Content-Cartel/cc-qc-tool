@@ -9,23 +9,35 @@ import NotificationDropdown from '@/components/notification-dropdown'
 
 export default function Nav() {
   const pathname = usePathname()
-  const { user, role, isPM, logout } = useAuth()
+  const { user, role, isPM, loading, logout } = useAuth()
 
-  const roleLabel = role === 'production_manager' ? 'PM' : role === 'admin' ? 'Admin' : 'Editor'
+  // While auth/profile are still loading, we don't yet know the user's role —
+  // avoid flashing the editor fallback nav/badge (which confused users into
+  // thinking they'd been signed out). Show a neutral loading state instead.
+  const roleResolved = !loading && role !== null
+  const roleLabel = !roleResolved
+    ? '…'
+    : role === 'production_manager'
+      ? 'PM'
+      : role === 'admin'
+        ? 'Admin'
+        : 'Editor'
 
-  const navItems = isPM
-    ? [
-        { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
-        { href: '/tasks/pm', label: 'Tasks', icon: ListTodo },
-        { href: '/pipeline', label: 'Pipeline', icon: GitBranch },
-        { href: '/dna', label: 'DNA', icon: Dna },
-        { href: '/admin', label: 'Admin', icon: Settings },
-      ]
-    : [
-        { href: '/tasks', label: 'Tasks', icon: ListTodo },
-        { href: '/submit', label: 'Submit', icon: Upload },
-        { href: '/my-submissions', label: 'My Work', icon: FileCheck },
-      ]
+  const navItems = !roleResolved
+    ? []
+    : isPM
+      ? [
+          { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
+          { href: '/tasks/pm', label: 'Tasks', icon: ListTodo },
+          { href: '/pipeline', label: 'Pipeline', icon: GitBranch },
+          { href: '/dna', label: 'DNA', icon: Dna },
+          { href: '/admin', label: 'Admin', icon: Settings },
+        ]
+      : [
+          { href: '/tasks', label: 'Tasks', icon: ListTodo },
+          { href: '/submit', label: 'Submit', icon: Upload },
+          { href: '/my-submissions', label: 'My Work', icon: FileCheck },
+        ]
 
   return (
     <nav className="sticky top-0 z-50 backdrop-blur-md" style={{ background: 'rgba(9, 9, 11, 0.85)', borderBottom: '1px solid var(--border)' }}>
