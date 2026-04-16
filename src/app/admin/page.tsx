@@ -52,7 +52,9 @@ export default function AdminPage() {
     try {
       const [profilesRes, assignmentsRes, clientsRes] = await Promise.all([
         supabase.from('profiles').select('*').order('display_name'),
-        supabase.from('editor_assignments').select('*, profiles(display_name), clients(name)').order('assigned_at', { ascending: false }),
+        // Specify FK explicitly (editor_id) — editor_assignments has two FKs
+        // to profiles (editor_id + assigned_by) so PostgREST can't auto-pick.
+        supabase.from('editor_assignments').select('*, profiles!editor_id(display_name), clients(name)').order('assigned_at', { ascending: false }),
         supabase.from('clients').select('id, name').in('phase', ['production', 'active', 'onboarding']).order('name'),
       ])
       // Surface the first non-RLS error if any query failed
