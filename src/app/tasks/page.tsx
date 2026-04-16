@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { motion } from 'framer-motion'
-import { ListTodo, RefreshCw } from 'lucide-react'
+import { ListTodo, RefreshCw, Filter } from 'lucide-react'
 import Nav from '@/components/nav'
 import TaskKanban from '@/components/task-kanban'
 import { useAuth } from '@/hooks/use-supabase-auth'
@@ -15,6 +15,7 @@ export default function EditorTasksPage() {
   const { userId, user, loading: authLoading } = useAuth()
   const [tasks, setTasks] = useState<Task[]>([])
   const [loading, setLoading] = useState(true)
+  const [clientFilter, setClientFilter] = useState<string>('all')
 
   const loadTasks = useCallback(async () => {
     if (!userId) return
@@ -84,8 +85,18 @@ export default function EditorTasksPage() {
     }
   }, [supabase, userId, loadTasks])
 
-  const activeTasks = tasks.filter(t => t.status !== 'approved')
-  const overdueCount = tasks.filter(t => new Date(t.deadline) < new Date() && t.status !== 'approved').length
+  // Unique clients for filter dropdown
+  const uniqueClients = Array.from(
+    new Map(tasks.map(t => [t.client_id, { id: t.client_id, name: t.client_name || 'Unknown' }])).values()
+  ).sort((a, b) => a.name.localeCompare(b.name))
+
+  // Apply client filter
+  const filteredTasks = clientFilter === 'all'
+    ? tasks
+    : tasks.filter(t => String(t.client_id) === clientFilter)
+
+  const activeTasks = filteredTasks.filter(t => t.status !== 'approved')
+  const overdueCount = filteredTasks.filter(t => new Date(t.deadline) < new Date() && t.status !== 'approved').length
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg)' }}>
@@ -105,10 +116,33 @@ export default function EditorTasksPage() {
                 )}
               </p>
             </div>
-            <button onClick={loadTasks} className="btn-ghost text-xs flex items-center gap-1.5">
-              <RefreshCw size={12} />
-              Refresh
-            </button>
+            <div className="flex items-center gap-2">
+              {uniqueClients.length > 1 && (
+                <div className="flex items-center gap-1.5">
+                  <Filter size={12} style={{ color: 'var(--text-3)' }} />
+                  <select
+                    value={clientFilter}
+                    onChange={(e) => setClientFilter(e.target.value)}
+                    className="input text-xs py-1 px-2"
+                    style={{ minWidth: '140px' }}
+                  >
+                    <option value="all">All clients ({tasks.length})</option>
+                    {uniqueClients.map(c => {
+                      const count = tasks.filter(t => t.client_id === c.id).length
+                      return (
+                        <option key={c.id} value={String(c.id)}>
+                          {c.name} ({count})
+                        </option>
+                      )
+                    })}
+                  </select>
+                </div>
+              )}
+              <button onClick={loadTasks} className="btn-ghost text-xs flex items-center gap-1.5">
+                <RefreshCw size={12} />
+                Refresh
+              </button>
+            </div>
           </div>
 
           {/* Loading */}
@@ -130,9 +164,15 @@ export default function EditorTasksPage() {
               <h2 className="text-sm font-medium mb-1" style={{ color: 'var(--text-2)' }}>No tasks assigned</h2>
               <p className="text-xs" style={{ color: 'var(--text-3)' }}>Tasks will appear here when assigned by the PM.</p>
             </div>
+          ) : filteredTasks.length === 0 ? (
+            <div className="text-center py-16">
+              <ListTodo size={32} className="mx-auto mb-3" style={{ color: 'var(--text-3)' }} />
+              <h2 className="text-sm font-medium mb-1" style={{ color: 'var(--text-2)' }}>No tasks for this client</h2>
+              <p className="text-xs" style={{ color: 'var(--text-3)' }}>Switch back to &ldquo;All clients&rdquo; to see your other work.</p>
+            </div>
           ) : (
             <TaskKanban
-              tasks={tasks}
+              tasks={filteredTasks}
               columns={EDITOR_KANBAN_COLUMNS}
               onStatusChange={handleStatusChange}
             />
