@@ -1,10 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { createServerSupabase } from '@/lib/supabase/server'
+import { randomBytes } from 'crypto'
 
 export const dynamic = 'force-dynamic'
 
-// Uses service_role key to call admin API (inviteUserByEmail)
 function getSupabaseAdmin() {
   return createClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
@@ -12,6 +12,17 @@ function getSupabaseAdmin() {
   )
 }
 
+function generatePassword(): string {
+  return randomBytes(12).toString('base64').replace(/[+/=]/g, '').slice(0, 16)
+}
+
+/**
+ * POST /api/admin/invite
+ *
+ * Creates a new user directly via auth.admin.createUser (no email sent).
+ * Returns the generated password so the admin can share it via Slack.
+ * The handle_new_user trigger auto-creates the profile row.
+ */
 export async function POST(req: NextRequest) {
   try {
     // Verify the caller is a PM or admin
@@ -20,12 +31,12 @@ export async function POST(req: NextRequest) {
     if (!user) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
     }
-    const { data: profile } = await userSupabase
+    const { data: callerProfile } = await userSupabase
       .from('profiles')
       .select('role')
       .eq('id', user.id)
       .single()
-    if (!profile || !['production_manager', 'admin'].includes(profile.role)) {
+    if (!callerProfile || !['production_manager', 'admin'].includes(callerProfile.role)) {
       return NextResponse.json({ error: 'Production manager or admin role required' }, { status: 403 })
     }
 
@@ -48,17 +59,15 @@ export async function POST(req: NextRequest) {
       )
     }
 
-    // Guard 1: reject self-invite (prevents admin from accidentally
-    // downgrading themselves by typing their own email in the form)
+    // Guard: reject self-invite
     if (email.toLowerCase() === user.email?.toLowerCase()) {
       return NextResponse.json(
-        { error: 'You cannot invite your own email. Your account already exists.' },
+        { error: 'You cannot add your own email. Your account already exists.' },
         { status: 400 }
       )
     }
 
-    // Guard 2: reject re-invite of an existing user (prevents
-    // raw_user_meta_data clobber which silently overwrites the target's role)
+    // Guard: reject if user already exists
     const { data: existing } = await supabaseAdmin
       .from('profiles')
       .select('id, display_name')
@@ -66,17 +75,18 @@ export async function POST(req: NextRequest) {
       .maybeSingle()
     if (existing) {
       return NextResponse.json(
-        {
-          error: `User ${existing.display_name} already exists. Use the key icon (🔑) in the Team Members list to set their password instead of re-inviting.`,
-        },
+        { error: `User ${existing.display_name} already exists. Use the key icon to reset their password instead.` },
         { status: 400 }
       )
     }
 
-    // Invite user via Supabase Auth admin API
-    // This sends them an email with a link to set their password
-    const { data, error } = await supabaseAdmin.auth.admin.inviteUserByEmail(email, {
-      data: {
+    // Create user directly — no email sent, no rate limits
+    const password = generatePassword()
+    const { data, error } = await supabaseAdmin.auth.admin.createUser({
+      email: email.toLowerCase(),
+      password,
+      email_confirm: true,
+      user_metadata: {
         display_name,
         role,
         slack_user_id: slack_user_id || null,
@@ -84,15 +94,11 @@ export async function POST(req: NextRequest) {
     })
 
     if (error) {
-      console.error('Invite error:', error)
-      return NextResponse.json(
-        { error: error.message },
-        { status: 400 }
-      )
+      console.error('Create user error:', error)
+      return NextResponse.json({ error: error.message }, { status: 400 })
     }
 
-    // The on_auth_user_created trigger will auto-create the profile row
-    // But we can also update the slack_user_id if provided (trigger may not capture it)
+    // Update slack_user_id on the profile if provided (trigger may not capture it)
     if (data.user && slack_user_id) {
       await supabaseAdmin
         .from('profiles')
@@ -106,9 +112,10 @@ export async function POST(req: NextRequest) {
       email,
       display_name,
       role,
+      password,
     })
   } catch (err) {
-    console.error('Admin invite error:', err)
+    console.error('Admin create user error:', err)
     return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
   }
 }

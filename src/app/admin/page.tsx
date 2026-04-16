@@ -97,9 +97,16 @@ export default function AdminPage() {
       const data = await res.json()
 
       if (!res.ok) {
-        setInviteMsg({ type: 'error', text: data.error || 'Failed to invite user' })
+        setInviteMsg({ type: 'error', text: data.error || 'Failed to create user' })
       } else {
-        setInviteMsg({ type: 'success', text: `Invite sent to ${inviteEmail}` })
+        // Show password modal so admin can copy credentials to Slack
+        setActivatedCreds({
+          email: inviteEmail.trim(),
+          password: data.password,
+          name: inviteName.trim(),
+        })
+        setCopied(false)
+        setInviteMsg({ type: 'success', text: `${inviteName.trim()} created — copy their credentials below` })
         setInviteEmail('')
         setInviteName('')
         setInviteSlack('')
@@ -252,7 +259,7 @@ export default function AdminPage() {
             <div className="card p-6">
               <div className="flex items-center gap-2 mb-4">
                 <UserPlus size={16} style={{ color: 'var(--gold)' }} />
-                <h2 className="text-sm font-semibold" style={{ color: 'var(--text)' }}>Invite User</h2>
+                <h2 className="text-sm font-semibold" style={{ color: 'var(--text)' }}>Add User</h2>
               </div>
               <form onSubmit={handleInvite} className="space-y-3">
                 <div>
@@ -305,7 +312,7 @@ export default function AdminPage() {
                   </p>
                 )}
                 <button type="submit" disabled={inviting} className="btn-primary w-full text-sm">
-                  {inviting ? 'Sending Invite...' : 'Send Invite'}
+                  {inviting ? 'Creating...' : 'Create User'}
                 </button>
               </form>
             </div>
