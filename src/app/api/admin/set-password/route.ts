@@ -48,8 +48,8 @@ export async function POST(req: NextRequest) {
       .eq('id', user.id)
       .single()
 
-    if (!profile || profile.role !== 'admin') {
-      return NextResponse.json({ error: 'Admin role required' }, { status: 403 })
+    if (!profile || !['production_manager', 'admin'].includes(profile.role)) {
+      return NextResponse.json({ error: 'Production manager or admin role required' }, { status: 403 })
     }
 
     const body = await req.json()

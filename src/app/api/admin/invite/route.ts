@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { createServerSupabase } from '@/lib/supabase/server'
 
 export const dynamic = 'force-dynamic'
 
@@ -13,6 +14,21 @@ function getSupabaseAdmin() {
 
 export async function POST(req: NextRequest) {
   try {
+    // Verify the caller is a PM or admin
+    const userSupabase = createServerSupabase()
+    const { data: { user } } = await userSupabase.auth.getUser()
+    if (!user) {
+      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+    }
+    const { data: profile } = await userSupabase
+      .from('profiles')
+      .select('role')
+      .eq('id', user.id)
+      .single()
+    if (!profile || !['production_manager', 'admin'].includes(profile.role)) {
+      return NextResponse.json({ error: 'Production manager or admin role required' }, { status: 403 })
+    }
+
     const supabaseAdmin = getSupabaseAdmin()
     const body = await req.json()
     const { email, display_name, role, slack_user_id } = body

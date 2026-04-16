@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react'
 import { motion } from 'framer-motion'
-import { UserPlus, Users, Link2, Trash2, Shield, Briefcase, Pencil, Check, X, Loader2, Key, Copy } from 'lucide-react'
+import { UserPlus, Users, Link2, Shield, Check, X, Loader2, Key, Copy } from 'lucide-react'
 import Nav from '@/components/nav'
 import { useAuth } from '@/hooks/use-supabase-auth'
 import { createClient } from '@/lib/supabase/client'
@@ -20,7 +20,7 @@ interface AssignmentWithJoins extends EditorAssignment {
 
 export default function AdminPage() {
   const supabase = createClient()
-  const { isAdmin, loading: authLoading } = useAuth()
+  const { isPM, loading: authLoading } = useAuth()
 
   const [profiles, setProfiles] = useState<Profile[]>([])
   const [assignments, setAssignments] = useState<AssignmentWithJoins[]>([])
@@ -35,15 +35,15 @@ export default function AdminPage() {
   const [inviting, setInviting] = useState(false)
   const [inviteMsg, setInviteMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
-  // Assignment form
-  const [assignEditorId, setAssignEditorId] = useState('')
-  const [assignClientId, setAssignClientId] = useState<number | ''>('')
-  const [assigning, setAssigning] = useState(false)
-
   // Activate user (set temp password)
   const [activatingId, setActivatingId] = useState<string | null>(null)
   const [activatedCreds, setActivatedCreds] = useState<{ email: string; password: string; name: string } | null>(null)
   const [copied, setCopied] = useState(false)
+
+  // Manage client assignments for an editor
+  const [manageEditor, setManageEditor] = useState<Profile | null>(null)
+  const [selectedClientIds, setSelectedClientIds] = useState<Set<number>>(new Set())
+  const [savingAssignments, setSavingAssignments] = useState(false)
 
   const loadData = useCallback(async () => {
     setLoading(true)
@@ -95,22 +95,53 @@ export default function AdminPage() {
     setInviting(false)
   }
 
-  const handleAssign = async (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!assignEditorId || !assignClientId) return
-    setAssigning(true)
+  const openManageModal = (editor: Profile) => {
+    const currentClientIds = assignments
+      .filter(a => a.editor_id === editor.id)
+      .map(a => a.client_id)
+    setSelectedClientIds(new Set(currentClientIds))
+    setManageEditor(editor)
+  }
 
-    const { error } = await supabase.from('editor_assignments').insert({
-      editor_id: assignEditorId,
-      client_id: assignClientId,
+  const toggleClientSelection = (clientId: number) => {
+    setSelectedClientIds(prev => {
+      const next = new Set(prev)
+      if (next.has(clientId)) next.delete(clientId)
+      else next.add(clientId)
+      return next
     })
+  }
 
-    if (!error) {
-      setAssignEditorId('')
-      setAssignClientId('')
-      loadData()
+  const saveAssignments = async () => {
+    if (!manageEditor) return
+    setSavingAssignments(true)
+
+    const currentAssignmentsForEditor = assignments.filter(a => a.editor_id === manageEditor.id)
+    const currentClientIds = new Set(currentAssignmentsForEditor.map(a => a.client_id))
+
+    const toAdd: number[] = []
+    selectedClientIds.forEach(id => { if (!currentClientIds.has(id)) toAdd.push(id) })
+
+    const toRemoveIds: string[] = currentAssignmentsForEditor
+      .filter(a => !selectedClientIds.has(a.client_id))
+      .map(a => a.id)
+
+    const ops: Promise<unknown>[] = []
+    if (toAdd.length > 0) {
+      ops.push(
+        supabase.from('editor_assignments').insert(
+          toAdd.map(cid => ({ editor_id: manageEditor.id, client_id: cid }))
+        )
+      )
     }
-    setAssigning(false)
+    if (toRemoveIds.length > 0) {
+      ops.push(supabase.from('editor_assignments').delete().in('id', toRemoveIds))
+    }
+    await Promise.all(ops)
+
+    setSavingAssignments(false)
+    setManageEditor(null)
+    loadData()
   }
 
   const handleRemoveAssignment = async (id: string) => {
@@ -163,20 +194,18 @@ export default function AdminPage() {
     )
   }
 
-  if (!isAdmin) {
+  if (!isPM) {
     return (
       <div className="min-h-screen" style={{ background: 'var(--bg)' }}>
         <Nav />
         <main className="max-w-4xl mx-auto px-4 py-8 text-center">
           <Shield size={32} style={{ color: 'var(--red)' }} className="mx-auto mb-3" />
           <h1 className="text-lg font-bold mb-1" style={{ color: 'var(--text)' }}>Access Denied</h1>
-          <p className="text-sm" style={{ color: 'var(--text-3)' }}>Admin access required.</p>
+          <p className="text-sm" style={{ color: 'var(--text-3)' }}>Production manager or admin access required.</p>
         </main>
       </div>
     )
   }
-
-  const editors = profiles.filter(p => p.role === 'editor')
 
   return (
     <div className="min-h-screen" style={{ background: 'var(--bg)' }}>
@@ -186,7 +215,7 @@ export default function AdminPage() {
           <h1 className="text-xl font-bold mb-1" style={{ color: 'var(--text)' }}>Admin</h1>
           <p className="text-xs mb-8" style={{ color: 'var(--text-3)' }}>Manage team members and client assignments</p>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="max-w-lg">
             {/* Invite User */}
             <div className="card p-6">
               <div className="flex items-center gap-2 mb-4">
@@ -248,47 +277,6 @@ export default function AdminPage() {
                 </button>
               </form>
             </div>
-
-            {/* Assign Editor → Client */}
-            <div className="card p-6">
-              <div className="flex items-center gap-2 mb-4">
-                <Link2 size={16} style={{ color: 'var(--gold)' }} />
-                <h2 className="text-sm font-semibold" style={{ color: 'var(--text)' }}>Assign Editor → Client</h2>
-              </div>
-              <form onSubmit={handleAssign} className="space-y-3">
-                <div>
-                  <label className="label">Editor</label>
-                  <select
-                    value={assignEditorId}
-                    onChange={(e) => setAssignEditorId(e.target.value)}
-                    className="input"
-                    required
-                  >
-                    <option value="">Select editor...</option>
-                    {editors.map((e) => (
-                      <option key={e.id} value={e.id}>{e.display_name}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="label">Client</label>
-                  <select
-                    value={assignClientId}
-                    onChange={(e) => setAssignClientId(Number(e.target.value))}
-                    className="input"
-                    required
-                  >
-                    <option value="">Select client...</option>
-                    {clients.map((c) => (
-                      <option key={c.id} value={c.id}>{c.name}</option>
-                    ))}
-                  </select>
-                </div>
-                <button type="submit" disabled={assigning} className="btn-primary w-full text-sm">
-                  {assigning ? 'Assigning...' : 'Assign'}
-                </button>
-              </form>
-            </div>
           </div>
 
           {/* Team Members */}
@@ -338,6 +326,15 @@ export default function AdminPage() {
                         </div>
                       )}
                       <span className={`badge badge-${roleColor} text-xs`}>{roleLabel}</span>
+                      {p.role === 'editor' && (
+                        <button
+                          onClick={() => openManageModal(p)}
+                          className="p-1.5 rounded-md transition-colors hover:bg-[var(--surface)]"
+                          title="Manage client assignments"
+                        >
+                          <Link2 size={12} style={{ color: 'var(--gold)' }} />
+                        </button>
+                      )}
                       <button
                         onClick={() => handleActivate(p)}
                         disabled={activatingId === p.id}
@@ -355,43 +352,80 @@ export default function AdminPage() {
             </div>
           </div>
 
-          {/* Current Assignments */}
-          <div className="card p-6 mt-6">
-            <div className="flex items-center gap-2 mb-4">
-              <Briefcase size={16} style={{ color: 'var(--gold)' }} />
-              <h2 className="text-sm font-semibold" style={{ color: 'var(--text)' }}>Editor → Client Assignments</h2>
-              <span className="badge badge-neutral text-xs ml-auto">{assignments.length} assignments</span>
-            </div>
-            {assignments.length === 0 ? (
-              <p className="text-sm text-center py-4" style={{ color: 'var(--text-3)' }}>
-                No assignments yet. Assign editors to clients above.
-              </p>
-            ) : (
-              <div className="space-y-2">
-                {assignments.map((a) => (
-                  <div
-                    key={a.id}
-                    className="flex items-center justify-between p-3 rounded-lg"
-                    style={{ background: 'var(--surface-2)' }}
-                  >
-                    <div className="flex items-center gap-2 text-sm">
-                      <span style={{ color: 'var(--text)' }}>{a.profiles?.display_name || 'Unknown'}</span>
-                      <span style={{ color: 'var(--text-3)' }}>→</span>
-                      <span className="badge badge-gold text-xs">{a.clients?.name || 'Unknown'}</span>
-                    </div>
-                    <button
-                      onClick={() => handleRemoveAssignment(a.id)}
-                      className="p-1.5 rounded-md transition-colors hover:bg-[var(--surface)]"
-                      title="Remove assignment"
-                    >
-                      <Trash2 size={12} style={{ color: 'var(--red)' }} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
         </motion.div>
+
+        {/* Manage Client Assignments Modal */}
+        {manageEditor && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center p-4"
+            style={{ background: 'rgba(0,0,0,0.7)' }}
+            onClick={() => !savingAssignments && setManageEditor(null)}
+          >
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95 }}
+              animate={{ opacity: 1, scale: 1 }}
+              className="card p-6 max-w-md w-full max-h-[80vh] flex flex-col"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center gap-2 mb-3">
+                <Link2 size={16} style={{ color: 'var(--gold)' }} />
+                <h2 className="text-sm font-semibold" style={{ color: 'var(--text)' }}>
+                  Manage clients for {manageEditor.display_name}
+                </h2>
+              </div>
+              <p className="text-xs mb-4" style={{ color: 'var(--text-3)' }}>
+                Check every client this editor works on. Changes save on click.
+              </p>
+              <div className="flex-1 overflow-y-auto space-y-1 mb-4">
+                {clients.length === 0 ? (
+                  <p className="text-xs text-center py-4" style={{ color: 'var(--text-3)' }}>
+                    No active clients found.
+                  </p>
+                ) : (
+                  clients.map((c) => {
+                    const checked = selectedClientIds.has(c.id)
+                    return (
+                      <label
+                        key={c.id}
+                        className="flex items-center gap-3 px-3 py-2 rounded-md cursor-pointer transition-colors hover:bg-[var(--surface-2)]"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleClientSelection(c.id)}
+                          className="w-4 h-4 rounded cursor-pointer"
+                          style={{ accentColor: 'var(--gold)' }}
+                        />
+                        <span className="text-sm" style={{ color: checked ? 'var(--text)' : 'var(--text-3)' }}>
+                          {c.name}
+                        </span>
+                      </label>
+                    )
+                  })
+                )}
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={saveAssignments}
+                  disabled={savingAssignments}
+                  className="btn-primary flex-1 text-sm flex items-center justify-center gap-2"
+                >
+                  {savingAssignments
+                    ? <><Loader2 size={14} className="animate-spin" /> Saving...</>
+                    : <><Check size={14} /> Save</>}
+                </button>
+                <button
+                  onClick={() => setManageEditor(null)}
+                  disabled={savingAssignments}
+                  className="px-4 py-2 rounded-md text-sm transition-colors hover:bg-[var(--surface-2)] disabled:opacity-50"
+                  style={{ color: 'var(--text-3)' }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
 
         {/* Credentials Modal */}
         {activatedCreds && (

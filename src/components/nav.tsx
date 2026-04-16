@@ -9,7 +9,7 @@ import NotificationDropdown from '@/components/notification-dropdown'
 
 export default function Nav() {
   const pathname = usePathname()
-  const { user, role, isPM, isAdmin, logout } = useAuth()
+  const { user, role, isPM, logout } = useAuth()
 
   const roleLabel = role === 'production_manager' ? 'PM' : role === 'admin' ? 'Admin' : 'Editor'
 
@@ -19,7 +19,7 @@ export default function Nav() {
         { href: '/tasks/pm', label: 'Tasks', icon: ListTodo },
         { href: '/pipeline', label: 'Pipeline', icon: GitBranch },
         { href: '/dna', label: 'DNA', icon: Dna },
-        ...(isAdmin ? [{ href: '/admin', label: 'Admin', icon: Settings }] : []),
+        { href: '/admin', label: 'Admin', icon: Settings },
       ]
     : [
         { href: '/tasks', label: 'Tasks', icon: ListTodo },
