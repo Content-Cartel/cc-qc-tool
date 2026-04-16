@@ -2,7 +2,7 @@ import { type NextRequest, NextResponse } from 'next/server'
 import { createMiddlewareClient } from '@/lib/supabase/middleware'
 
 // Routes that don't require authentication
-const PUBLIC_ROUTES = ['/login', '/api/intake', '/api/tasks/create', '/api/cron', '/api/webhook']
+const PUBLIC_ROUTES = ['/login', '/api/intake', '/api/tasks/create', '/api/cron', '/api/webhook', '/review']
 // Routes that are for client portal (separate auth)
 const CLIENT_ROUTES = ['/client']
 

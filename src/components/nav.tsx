@@ -9,7 +9,7 @@ import NotificationDropdown from '@/components/notification-dropdown'
 
 export default function Nav() {
   const pathname = usePathname()
-  const { user, role, isPM, loading, logout } = useAuth()
+  const { user, role, isPM, loading, logout } = useAuth(false)
 
   // While auth/profile are still loading, we don't yet know the user's role —
   // avoid flashing the editor fallback nav/badge (which confused users into

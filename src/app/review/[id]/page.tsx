@@ -82,7 +82,7 @@ export default function ReviewPage() {
   const router = useRouter()
   const params = useParams()
   const supabase = createClient()
-  const { user, isPM } = useAuth()
+  const { user, isPM } = useAuth(false)
   const submissionId = params.id as string
 
 
