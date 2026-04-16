@@ -161,7 +161,7 @@ export async function POST(req: NextRequest) {
       .select('id')
       .eq('role', 'admin')
       .limit(1)
-      .single()
+      .maybeSingle()
 
     const createdBy = adminProfile?.id || assignedEditorId
 

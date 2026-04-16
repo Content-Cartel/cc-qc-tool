@@ -100,7 +100,7 @@ export async function POST(req: NextRequest) {
       .eq('client_id', submission.client_id)
       .order('version', { ascending: false })
       .limit(1)
-      .single()
+      .maybeSingle()
 
     let dnaExcerpt = ''
     if (dna?.dna_markdown) {

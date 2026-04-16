@@ -53,7 +53,7 @@ export default function TaskCreateModal({ isOpen, onClose, onCreated, creatorId 
     const findEditor = async () => {
       const { data } = await supabase
         .from('editor_assignments')
-        .select('editor_id, profiles(id, display_name)')
+        .select('editor_id, profiles!editor_id(id, display_name)')
         .eq('client_id', clientId)
         .limit(1)
       if (data && data.length > 0) {

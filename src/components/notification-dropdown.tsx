@@ -10,7 +10,7 @@ import type { Notification } from '@/lib/supabase/types'
 
 export default function NotificationDropdown() {
   const supabase = createClient()
-  const { user } = useAuth()
+  const { user } = useAuth(false)
   const [notifications, setNotifications] = useState<Notification[]>([])
   const [open, setOpen] = useState(false)
   const dropdownRef = useRef<HTMLDivElement>(null)
