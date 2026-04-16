@@ -46,8 +46,8 @@ export default function AdminPage() {
   const [selectedClientIds, setSelectedClientIds] = useState<Set<number>>(new Set())
   const [savingAssignments, setSavingAssignments] = useState(false)
 
-  const loadData = useCallback(async () => {
-    setLoading(true)
+  const loadData = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true)
     setLoadError(null)
     try {
       const [profilesRes, assignmentsRes, clientsRes] = await Promise.all([
@@ -103,7 +103,7 @@ export default function AdminPage() {
         setInviteEmail('')
         setInviteName('')
         setInviteSlack('')
-        loadData()
+        loadData(true)
       }
     } catch {
       setInviteMsg({ type: 'error', text: 'Something went wrong' })
@@ -157,12 +157,12 @@ export default function AdminPage() {
 
     setSavingAssignments(false)
     setManageEditor(null)
-    loadData()
+    loadData(true)
   }
 
   const handleRemoveAssignment = async (id: string) => {
     await supabase.from('editor_assignments').delete().eq('id', id)
-    loadData()
+    loadData(true)
   }
 
   const handleActivate = async (profile: Profile) => {

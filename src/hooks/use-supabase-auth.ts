@@ -67,18 +67,27 @@ export function useAuth(requireAuth = true): AuthState {
 
     initAuth()
 
-    // Listen for auth state changes
+    // Listen for auth state changes — but DON'T flash loading state.
+    // Only update if the user actually changed (sign-in / sign-out),
+    // not on routine token refreshes which fire SIGNED_IN again.
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
-        if (event === 'SIGNED_IN' && session?.user) {
-          setAuthUser(session.user)
-          await fetchProfile(session.user.id)
-        } else if (event === 'SIGNED_OUT') {
+        if (event === 'SIGNED_OUT') {
           setAuthUser(null)
           setProfile(null)
           if (requireAuth) {
             router.push('/login')
           }
+        } else if (event === 'SIGNED_IN' && session?.user) {
+          // Only re-fetch profile if the user ID actually changed
+          // (e.g. different account signed in). Skip on token refresh
+          // to avoid re-rendering the entire page.
+          setAuthUser(prev => {
+            if (prev?.id !== session.user.id) {
+              fetchProfile(session.user.id)
+            }
+            return session.user
+          })
         }
       }
     )
