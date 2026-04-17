@@ -1,10 +1,14 @@
 import { NextRequest } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-)
+export const dynamic = 'force-dynamic'
+
+function getSupabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
+}
 
 /**
  * POST /api/transcripts/drive
@@ -49,6 +53,7 @@ function resolveSourceId(p: DrivePayload): string | null {
 }
 
 async function handleSingle(payload: DrivePayload) {
+  const supabase = getSupabase()
   const { client_id, transcript_text, title, duration_seconds, recorded_at, metadata, relevance_tag, submission_id } = payload
   const source_id = resolveSourceId(payload)
 
@@ -89,6 +94,7 @@ async function handleBatch(items: DrivePayload[]) {
     return Response.json({ error: 'Empty batch' }, { status: 400 })
   }
 
+  const supabase = getSupabase()
   const results: { source_id: string; success: boolean; error?: string; word_count?: number }[] = []
 
   for (const item of items) {

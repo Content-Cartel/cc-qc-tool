@@ -6,11 +6,14 @@ import { ccPostProcess, CC_PLATFORM_DEFAULTS } from '@/lib/content/cc-rules'
 import { buildFallbackPrompt, extractDNASection } from '@/lib/content/fallback-prompt'
 
 export const maxDuration = 300 // 5 min for batch processing
+export const dynamic = 'force-dynamic'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-)
+function getSupabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
+}
 
 const BATCH_SIZE = 4 // Process 4 clients in parallel to stay within timeout
 
@@ -131,6 +134,7 @@ function extractDNATopics(dnaMarkdown: string | null): string[] {
  * Saves to generated_content table, appends to Google Doc, notifies Slack.
  */
 export async function GET(req: NextRequest) {
+  const supabase = getSupabase()
   // Verify cron secret (Vercel sends this header for cron jobs)
   const authHeader = req.headers.get('authorization')
   const cronSecret = process.env.CRON_SECRET

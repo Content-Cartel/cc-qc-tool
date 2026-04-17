@@ -15,11 +15,14 @@ import { loadRecentApprovedExamples } from '@/lib/content/approved-examples'
 import { POSTGEN_MODEL } from '@/lib/content/postgen-model'
 
 export const maxDuration = 180
+export const dynamic = 'force-dynamic'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-)
+function getSupabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
+}
 
 interface GeneratePostsRequest {
   client_id: number
@@ -54,6 +57,7 @@ const PLATFORM_MAX_TOKENS: Record<Platform, number> = {
  * commitment of the rebuild.
  */
 export async function POST(req: NextRequest) {
+  const supabase = getSupabase()
   const body: GeneratePostsRequest = await req.json()
   const { client_id, transcript_id, submission_id, platforms, include_few_shot = true } = body
 

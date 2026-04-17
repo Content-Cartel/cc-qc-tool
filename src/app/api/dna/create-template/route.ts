@@ -2,10 +2,14 @@ import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { findClientFolder, createDNATemplateDoc } from '@/lib/google-docs'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-)
+export const dynamic = 'force-dynamic'
+
+function getSupabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
+}
 
 /**
  * POST /api/dna/create-template
@@ -15,6 +19,7 @@ const supabase = createClient(
  * Saves the doc URL to client_settings.dna_doc_url.
  */
 export async function POST(req: NextRequest) {
+  const supabase = getSupabase()
   const { client_id } = await req.json()
 
   if (!client_id) {

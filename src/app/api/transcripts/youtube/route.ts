@@ -1,10 +1,14 @@
 import { NextRequest } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-)
+export const dynamic = 'force-dynamic'
+
+function getSupabase() {
+  return createClient(
+    process.env.NEXT_PUBLIC_SUPABASE_URL!,
+    process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
+}
 
 /**
  * POST /api/transcripts/youtube
@@ -41,6 +45,7 @@ interface TranscriptPayload {
 }
 
 async function handleSingle(payload: TranscriptPayload) {
+  const supabase = getSupabase()
   const { client_id, video_id, transcript_text, title, duration_seconds, recorded_at, metadata } = payload
 
   if (!client_id || !video_id || !transcript_text) {
@@ -81,6 +86,7 @@ async function handleBatch(items: TranscriptPayload[]) {
     return Response.json({ error: 'Empty batch' }, { status: 400 })
   }
 
+  const supabase = getSupabase()
   const results: { video_id: string; success: boolean; error?: string; word_count?: number }[] = []
 
   for (const item of items) {
