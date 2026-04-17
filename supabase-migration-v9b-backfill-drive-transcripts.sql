@@ -11,7 +11,11 @@
 -- Filters:
 --   - transcript_status = 'completed' (no garbage from failed Deepgram jobs)
 --   - length(transcript) > 200 (no trivial/empty transcripts)
---   - intake_source = 'n8n_drive' (Drive-origin only, not manual/ingested)
+--
+-- Note: intake_source is NOT filtered. Both 'n8n_drive' (automated Drive
+-- watcher) and 'manual' (PM-submitted Drive link) submissions feed the same
+-- Deepgram pipeline and produce equivalent transcripts. Tagging them all
+-- source='drive_deepgram' accurately reflects the provenance.
 -- ============================================================================
 
 INSERT INTO client_transcripts (
@@ -45,7 +49,6 @@ FROM qc_submissions s
 WHERE s.transcript IS NOT NULL
   AND length(s.transcript) > 200
   AND s.transcript_status = 'completed'
-  AND s.intake_source = 'n8n_drive'
 ON CONFLICT (client_id, source, source_id) DO NOTHING;
 
 -- Show how many twin rows now exist so we can verify the backfill landed.
