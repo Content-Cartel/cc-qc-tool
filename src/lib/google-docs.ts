@@ -161,27 +161,17 @@ function findTab(
 const NEW_TAB_INSERT_INDEX = 1
 
 /**
- * Get a child tab (by title) under a given parent tabId, or create it.
- * Returns the tabId of the resolved tab.
+ * Create a child tab under a given parent tabId. No get-first lookup — the
+ * caller already knows whether a child with this title exists (from the
+ * single initial documents.get) and skips the call if it does.
  */
-async function ensureChildTab(
+async function createChildTab(
   docsApi: docs_v1.Docs,
   documentId: string,
   parentTabId: string,
   childTitle: string,
   iconEmoji: string,
-  order: number,
 ): Promise<string | null> {
-  const refresh = await docsApi.documents.get({
-    documentId,
-    includeTabsContent: true,
-  })
-  const parentTab = findTab(refresh.data.tabs, t => t.tabProperties?.tabId === parentTabId)
-  const existing = parentTab?.childTabs?.find(
-    t => t.tabProperties?.title === childTitle,
-  )
-  if (existing?.tabProperties?.tabId) return existing.tabProperties.tabId
-
   const addRes = await docsApi.documents.batchUpdate({
     documentId,
     requestBody: {
@@ -191,7 +181,6 @@ async function ensureChildTab(
             tabProperties: {
               title: childTitle,
               parentTabId,
-              index: order,
               iconEmoji,
             },
           },
@@ -270,8 +259,19 @@ export async function appendPostsToDoc(
       findTab(initial.data.tabs, t => t.tabProperties?.title === weekLabel)
         ?.tabProperties?.tabId || null
 
-    if (!weekTabId) {
-      // Create at the top of the list so the newest week is first.
+    // Record existing child tabs under the week parent (keyed by title) so a
+    // re-run in the same week reuses them instead of creating duplicates.
+    const existingChildByTitle = new Map<string, string>()
+    if (weekTabId) {
+      const weekTab = findTab(initial.data.tabs, t => t.tabProperties?.tabId === weekTabId)
+      for (const c of weekTab?.childTabs || []) {
+        const title = c.tabProperties?.title
+        const id = c.tabProperties?.tabId
+        if (title && id) existingChildByTitle.set(title, id)
+      }
+    } else {
+      // Append at the end (omit index). On a legacy doc the existing body
+      // becomes the implicit first tab and our new week tab becomes a sibling.
       const createRes = await docsApi.documents.batchUpdate({
         documentId: docInfo.docId,
         requestBody: {
@@ -280,7 +280,6 @@ export async function appendPostsToDoc(
               addDocumentTab: {
                 tabProperties: {
                   title: weekLabel,
-                  index: 0,
                   iconEmoji: WEEK_TAB_EMOJI,
                 },
               },
@@ -296,20 +295,22 @@ export async function appendPostsToDoc(
       }
     }
 
-    // 3. For each platform, ensure a child tab exists, then write posts.
-    for (let i = 0; i < PLATFORM_TAB_ORDER.length; i++) {
-      const platform = PLATFORM_TAB_ORDER[i]
+    // 3. For each platform, use existing child tab if present, else create.
+    for (const platform of PLATFORM_TAB_ORDER) {
       const posts = postsByPlatform[platform] || []
       if (posts.length === 0) continue
 
-      const childTabId = await ensureChildTab(
-        docsApi,
-        docInfo.docId,
-        weekTabId,
-        PLATFORM_TAB_TITLE[platform],
-        PLATFORM_TAB_EMOJI[platform],
-        i,
-      )
+      const childTitle = PLATFORM_TAB_TITLE[platform]
+      let childTabId = existingChildByTitle.get(childTitle) || null
+      if (!childTabId) {
+        childTabId = await createChildTab(
+          docsApi,
+          docInfo.docId,
+          weekTabId,
+          childTitle,
+          PLATFORM_TAB_EMOJI[platform],
+        )
+      }
       if (!childTabId) {
         console.error(
           `[google-docs] Failed to create ${platform} tab under ${weekLabel} for ${clientName}`,
@@ -317,13 +318,13 @@ export async function appendPostsToDoc(
         continue
       }
 
-      // Build the content: headed, numbered, separated. One pass for clarity;
-      // the model output is already cleaned by ccPostProcess.
+      // Build the content: headed, numbered, separated. The model output is
+      // already cleaned by ccPostProcess.
       const body = posts
         .map((p, idx) =>
           posts.length > 1
-            ? `## ${PLATFORM_TAB_TITLE[platform]} — Post ${idx + 1}\n\n${p}\n`
-            : `## ${PLATFORM_TAB_TITLE[platform]}\n\n${p}\n`,
+            ? `## ${childTitle} — Post ${idx + 1}\n\n${p}\n`
+            : `## ${childTitle}\n\n${p}\n`,
         )
         .join('\n---\n\n')
 
@@ -333,7 +334,6 @@ export async function appendPostsToDoc(
           requests: [
             {
               insertText: {
-                tabId: childTabId,
                 location: { index: NEW_TAB_INSERT_INDEX, tabId: childTabId },
                 text: body + '\n',
               },
@@ -345,7 +345,11 @@ export async function appendPostsToDoc(
 
     return { url: docInfo.url, docId: docInfo.docId }
   } catch (err) {
-    console.error(`[google-docs] Error appending to doc for ${clientName}:`, err)
+    const message = err instanceof Error ? err.message : String(err)
+    // Surface the full error so the Vercel log shows the API response body,
+    // not just "Error appending...". Real examples we've seen: "The tab was not found",
+    // "Invalid requests[0].insertText: Index 1 has no corresponding paragraph".
+    console.error(`[google-docs] Error appending to doc for ${clientName}: ${message}`)
     return null
   }
 }
