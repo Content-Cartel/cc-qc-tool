@@ -41,6 +41,9 @@ export interface GenerationInputs {
   dnaMarkdown: string | null
   /** Phase 4: rollup of active client_knowledge_entries (DO/DONT/corrections). */
   knowledgeNotes: string | null
+  /** Hard-line per-client compliance rules (verbatim, from clients.compliance_rules).
+   *  Rendered as RULE TWO in the system prompt; model must self-check against each line. */
+  complianceRules: string | null
   /** Recent human-approved posts for the same platform. STYLE reference only. */
   recentApprovedPosts: ContentExampleRow[]
   /** REQUIRED. The transcript the post must draw its facts from. */
@@ -48,6 +51,14 @@ export interface GenerationInputs {
   transcriptTitle: string
   /** True if the transcript was pre-extracted via Haiku (>15K chars). Informational. */
   wasExtracted: boolean
+  /** Optional distinct-angle hint for this specific post, from pre-extraction.
+   *  When provided, steers the post toward one specific takeaway so parallel posts
+   *  from the same transcript don't converge to duplicates. */
+  angle?: string | null
+  /** 1-based index of this post within its batch + total count, used in the
+   *  user prompt to give the model awareness that siblings exist. Optional. */
+  postIndex?: number
+  postTotal?: number
 }
 
 const PLATFORM_LABEL: Record<Platform, string> = {
@@ -181,6 +192,32 @@ If any claim in your draft has no transcript support, you violated Rule Zero —
 The caller will strip <traceback> before saving. It exists so humans can audit that every claim is real.`
 }
 
+function buildComplianceRules(rules: string | null): string | null {
+  if (!rules || !rules.trim()) return null
+  return `═══ RULE TWO — CLIENT COMPLIANCE (NON-NEGOTIABLE) ═══
+
+The following rules are hard-line client-specific compliance rules. They override stylistic choices. If any rule is unclear, ERR ON THE SIDE OF THE RULE, not the style.
+
+${rules.trim()}
+
+Before emitting <draft>, silently re-read the draft against every rule above. If the draft violates ANY rule, rewrite it until clean. Only emit when the draft satisfies every rule.`
+}
+
+function buildSelfCheck(): string {
+  return `═══ FINAL SELF-CHECK (SILENT — DO NOT OUTPUT) ═══
+
+Before emitting <draft>, run this checklist on your draft in your head:
+1. Every factual claim traces to the transcript? (Rule Zero)
+2. Tone matches the transcript's tone? (Rule One)
+3. Every client-compliance rule satisfied? (Rule Two, if present)
+4. Post angle is distinct (doesn't repeat hooks from other posts in this batch)?
+5. CTA ties to the specific pain/opportunity THIS post raises, not a canned generic?
+6. No em-dashes, no hype phrases, no generic filler, no invented specifics?
+7. Length fits the platform?
+
+If any answer is NO, rewrite before emitting. The <traceback> block comes AFTER the <draft> but the silent self-check happens BEFORE you commit to the draft.`
+}
+
 /**
  * Build the full system prompt. Throws `MissingVoiceError` if no voice source
  * is available (neither masterPrompt nor any DNA). Does NOT throw on missing
@@ -189,6 +226,10 @@ The caller will strip <traceback> before saving. It exists so humans can audit t
 export function buildGenerationSystemPrompt(i: GenerationInputs): string {
   const blocks: string[] = []
   blocks.push(buildRuleZero(i.clientName, i.platform))
+  // RULE TWO (client compliance) sits right after Rule Zero so its
+  // rules get the highest priority placement after the grounding rule.
+  const compliance = buildComplianceRules(i.complianceRules)
+  if (compliance) blocks.push(compliance)
   blocks.push(buildVoiceSpine(i))
   const brand = buildBrandSection(i)
   if (brand) blocks.push(brand)
@@ -198,6 +239,7 @@ export function buildGenerationSystemPrompt(i: GenerationInputs): string {
   const corrections = buildKnowledgeNotes(i.knowledgeNotes)
   if (corrections) blocks.push(corrections)
   blocks.push(buildOutputContract(i.platform))
+  blocks.push(buildSelfCheck())
   return blocks.join('\n\n')
 }
 
@@ -213,11 +255,20 @@ export function buildGenerationUserPrompt(i: GenerationInputs): string {
   const extractionNote = i.wasExtracted
     ? ' (key signal extracted via AI — the full transcript was too long to fit; the excerpt below preserves the speaker\'s claims)'
     : ''
+
+  const angleBlock = i.angle && i.angle.trim()
+    ? `\n\n<angle_focus>\nThis is ONE of several posts being generated from this transcript in parallel for this week. To avoid duplicates across the batch, focus THIS post specifically on the following angle:\n\n${i.angle.trim()}\n\nStay with this angle — don't drift to other angles the transcript could support; other posts are handling those.\n</angle_focus>`
+    : ''
+
+  const batchNote = i.postIndex && i.postTotal
+    ? `\n\nYou are writing post ${i.postIndex} of ${i.postTotal} for this batch. Other posts are covering different angles from the same source.`
+    : ''
+
   return `<transcript title="${i.transcriptTitle.replace(/"/g, '&quot;')}"${extractionNote ? ' extracted="true"' : ''}>
 ${i.transcriptText.trim()}
-</transcript>
+</transcript>${angleBlock}
 
-Write ONE ${PLATFORM_LABEL[i.platform]} post based on the transcript above. Pick the single most compelling, unique, or valuable idea and go DEEP on it — do not skim across multiple topics.
+Write ONE ${PLATFORM_LABEL[i.platform]} post based on the transcript above${i.angle ? ', focused on the angle specified above' : '. Pick the single most compelling, unique, or valuable idea and go DEEP on it — do not skim across multiple topics'}.${batchNote}
 
 Stay within ${PLATFORM_CHAR_RANGE[i.platform]}.
 

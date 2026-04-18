@@ -14,6 +14,7 @@ import {
 import { loadRecentApprovedExamples } from '@/lib/content/approved-examples'
 import { POSTGEN_MODEL } from '@/lib/content/postgen-model'
 import { extractTranscriptSignal } from '@/lib/content/transcript-extractor'
+import { extractDistinctAngles, formatAngleForPrompt, type Angle } from '@/lib/content/angle-extractor'
 
 export const maxDuration = 600 // 10 min — 14 posts × 10+ clients needs headroom even with per-client parallelism
 export const dynamic = 'force-dynamic'
@@ -162,8 +163,8 @@ export async function GET(req: NextRequest) {
         return { client_name: clientName, status: 'skipped: no eligible transcripts' }
       }
 
-      // Get DNA + custom prompt for voice spine
-      const [{ data: dna }, { data: clientPrompt }] = await Promise.all([
+      // Get DNA + custom prompt + compliance rules for voice spine
+      const [{ data: dna }, { data: clientPrompt }, { data: complianceRow }] = await Promise.all([
         supabase
           .from('client_dna')
           .select('dna_markdown')
@@ -179,7 +180,14 @@ export async function GET(req: NextRequest) {
           .order('version', { ascending: false })
           .limit(1)
           .maybeSingle(),
+        supabase
+          .from('clients')
+          .select('compliance_rules')
+          .eq('id', clientId)
+          .maybeSingle(),
       ])
+
+      const complianceRules = complianceRow?.compliance_rules || null
 
       if (!clientPrompt?.system_prompt && !dna?.dna_markdown) {
         return { client_name: clientName, status: 'skipped: no master prompt or DNA' }
@@ -225,8 +233,49 @@ export async function GET(req: NextRequest) {
         facebook: await loadRecentApprovedExamples(supabase, clientId, 'facebook', 3),
       }
 
+      // Pre-extract distinct angles per transcript so parallel posts drawing
+      // from the same source don't converge into duplicates. Count how many
+      // posts each transcript feeds, ask Haiku for that many distinct angles,
+      // then assign one angle to each post slot.
+      const transcriptPostCounts = new Map<string, number>()
+      for (const plan of postPlan) {
+        transcriptPostCounts.set(
+          plan.transcript_id,
+          (transcriptPostCounts.get(plan.transcript_id) || 0) + 1,
+        )
+      }
+      const anglesByTranscript = new Map<string, Angle[]>()
+      await Promise.all(
+        Array.from(transcriptPostCounts.entries()).map(async ([tid, n]) => {
+          const processed = extractionByTranscript.get(tid)
+          if (!processed || !processed.text || n < 1) {
+            anglesByTranscript.set(tid, [])
+            return
+          }
+          const t = validTranscripts.find(v => v.id === tid)
+          const angles = await extractDistinctAngles(
+            processed.text,
+            t?.title || 'Untitled',
+            n,
+            anthropicKey!,
+          )
+          anglesByTranscript.set(tid, angles)
+        }),
+      )
+
+      // Walking-cursor per transcript so each post pops the next angle in line.
+      const angleCursor = new Map<string, number>()
+      const takeAngle = (tid: string): Angle | null => {
+        const pool = anglesByTranscript.get(tid) || []
+        if (pool.length === 0) return null
+        const i = angleCursor.get(tid) || 0
+        angleCursor.set(tid, i + 1)
+        return pool[i % pool.length]
+      }
+
       // Generate all posts IN PARALLEL. Anthropic handles per-tier rate limits;
       // Sonnet 4.5 tiers allow well beyond 14 concurrent calls.
+      const assignedAngles: (Angle | null)[] = postPlan.map(p => takeAngle(p.transcript_id))
       const generatePost = async (plan: PostPlan, i: number) => {
         const transcript = validTranscripts.find(t => t.id === plan.transcript_id)
         if (!transcript?.transcript_text) {
@@ -239,6 +288,7 @@ export async function GET(req: NextRequest) {
         }
 
         const processed = extractionByTranscript.get(plan.transcript_id)!
+        const angle = assignedAngles[i]
 
         const inputs = {
           clientName,
@@ -247,10 +297,14 @@ export async function GET(req: NextRequest) {
           dnaDocText: null, // Phase 3 will populate
           dnaMarkdown: dna?.dna_markdown || null, // Phase 1 legacy fallback
           knowledgeNotes: null, // Phase 4 will populate
+          complianceRules,
           recentApprovedPosts: approvedByPlatform[plan.platform],
           transcriptText: processed.text,
           transcriptTitle: plan.transcript_title,
           wasExtracted: processed.wasExtracted,
+          angle: angle ? formatAngleForPrompt(angle) : null,
+          postIndex: i + 1,
+          postTotal: postPlan.length,
         }
         const systemPrompt = buildGenerationSystemPrompt(inputs)
         const userPrompt = buildGenerationUserPrompt(inputs)

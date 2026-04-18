@@ -116,7 +116,7 @@ export async function POST(req: NextRequest) {
     )
   }
 
-  // Fetch client DNA + master prompt + name in parallel.
+  // Fetch client DNA + master prompt + name + compliance rules in parallel.
   const [dnaResult, clientPromptResult, clientResult] = await Promise.all([
     supabase
       .from('client_dna')
@@ -135,7 +135,7 @@ export async function POST(req: NextRequest) {
       .maybeSingle(),
     supabase
       .from('clients')
-      .select('name')
+      .select('name, compliance_rules')
       .eq('id', client_id)
       .single(),
   ])
@@ -143,6 +143,7 @@ export async function POST(req: NextRequest) {
   const dna = dnaResult.data
   const clientPrompt = clientPromptResult.data
   const clientName = clientResult.data?.name || `Client ${client_id}`
+  const complianceRules = clientResult.data?.compliance_rules || null
 
   const encoder = new TextEncoder()
 
@@ -208,30 +209,21 @@ export async function POST(req: NextRequest) {
           let systemPrompt: string
           let userPrompt: string
           try {
-            systemPrompt = buildGenerationSystemPrompt({
+            const inputs = {
               clientName,
               platform,
               masterPrompt: clientPrompt?.system_prompt || null,
               dnaDocText: null,                           // Phase 3 will populate
               dnaMarkdown: dna?.dna_markdown || null,     // Phase 1 legacy fallback
               knowledgeNotes: null,                       // Phase 4 will populate
+              complianceRules,
               recentApprovedPosts,
               transcriptText: processedTranscript,
               transcriptTitle,
               wasExtracted,
-            })
-            userPrompt = buildGenerationUserPrompt({
-              clientName,
-              platform,
-              masterPrompt: clientPrompt?.system_prompt || null,
-              dnaDocText: null,
-              dnaMarkdown: dna?.dna_markdown || null,
-              knowledgeNotes: null,
-              recentApprovedPosts,
-              transcriptText: processedTranscript,
-              transcriptTitle,
-              wasExtracted,
-            })
+            }
+            systemPrompt = buildGenerationSystemPrompt(inputs)
+            userPrompt = buildGenerationUserPrompt(inputs)
           } catch (err) {
             if (err instanceof MissingTranscriptError || err instanceof MissingVoiceError) {
               sendEvent('error', { message: err.message, platform })
