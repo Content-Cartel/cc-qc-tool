@@ -2,6 +2,10 @@
   "framework": "nextjs",
   "crons": [
     {
+      "path": "/api/cron/auto-transcribe",
+      "schedule": "0 12 * * *"
+    },
+    {
       "path": "/api/cron/scrape-transcripts",
       "schedule": "0 14 * * 3"
     },
