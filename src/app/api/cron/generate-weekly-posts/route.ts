@@ -2,8 +2,17 @@ import { NextRequest, NextResponse } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { createClient } from '@supabase/supabase-js'
 import { findClientFolder, appendPostsToDoc } from '@/lib/google-docs'
-import { ccPostProcess, CC_PLATFORM_DEFAULTS } from '@/lib/content/cc-rules'
-import { buildFallbackPrompt, extractDNASection } from '@/lib/content/fallback-prompt'
+import { ccPostProcess } from '@/lib/content/cc-rules'
+import {
+  buildGenerationSystemPrompt,
+  buildGenerationUserPrompt,
+  extractDraft,
+  MissingVoiceError,
+  type Platform,
+} from '@/lib/content/build-generation-prompt'
+import { loadRecentApprovedExamples } from '@/lib/content/approved-examples'
+import { POSTGEN_MODEL } from '@/lib/content/postgen-model'
+import { extractTranscriptSignal } from '@/lib/content/transcript-extractor'
 
 export const maxDuration = 300 // 5 min for batch processing
 export const dynamic = 'force-dynamic'
@@ -17,121 +26,72 @@ function getSupabase() {
 
 const BATCH_SIZE = 4 // Process 4 clients in parallel to stay within timeout
 
-type Platform = 'linkedin' | 'twitter' | 'facebook'
+const PLATFORM_MAX_TOKENS: Record<Platform, number> = {
+  linkedin: 2400,
+  twitter: 1000,
+  facebook: 1600,
+}
 
 interface PostPlan {
   platform: Platform
-  transcript_id?: string
-  transcript_title?: string
-  topic?: string // for prompt-only posts
+  transcript_id: string
+  transcript_title: string
 }
 
 interface ClientResult {
   client_name: string
   status: string
   post_count?: number
-  transcript_posts?: number
-  dna_posts?: number
   doc_url?: string
+  /** Brief summary of each traceback so the Slack note/log shows audit trail existed. */
+  traceback_summary?: string
 }
 
 /**
- * Build a plan of 5 posts for a client based on available transcripts.
- * Platform mix: 2 LinkedIn, 2 X/Twitter, 1 Facebook
+ * Build a plan of 5 transcript-grounded posts for a client.
+ * Platform mix: 2 LinkedIn, 2 X/Twitter, 1 Facebook.
+ *
+ * If no transcripts are available, returns an empty array. The caller skips
+ * the client — no DNA-only generation. This is the non-negotiable Rule Zero
+ * guarantee: no transcript, no post.
  */
 function buildPostPlan(
   transcripts: { id: string; title: string }[],
-  dnaTopics: string[],
 ): PostPlan[] {
+  if (transcripts.length === 0) return []
+
   const platforms: Platform[] = ['linkedin', 'twitter', 'linkedin', 'twitter', 'facebook']
   const posts: PostPlan[] = []
 
+  // Distribute 5 posts across available transcripts.
+  // 3+ transcripts: 2/2/1.  2 transcripts: 3/2.  1 transcript: 5-from-one.
+  let assignments: number[]
   if (transcripts.length >= 3) {
-    // 2 from t1, 2 from t2, 1 from t3
-    const assignments = [0, 1, 0, 1, 2]
-    for (let i = 0; i < 5; i++) {
-      const t = transcripts[assignments[i]]
-      posts.push({ platform: platforms[i], transcript_id: t.id, transcript_title: t.title })
-    }
+    assignments = [0, 1, 0, 1, 2]
   } else if (transcripts.length === 2) {
-    // 3 from t1, 2 from t2
-    const assignments = [0, 1, 0, 1, 0]
-    for (let i = 0; i < 5; i++) {
-      const t = transcripts[assignments[i]]
-      posts.push({ platform: platforms[i], transcript_id: t.id, transcript_title: t.title })
-    }
-  } else if (transcripts.length === 1) {
-    // 3 from transcript, 2 prompt-only
-    const t = transcripts[0]
-    posts.push({ platform: 'linkedin', transcript_id: t.id, transcript_title: t.title })
-    posts.push({ platform: 'twitter', transcript_id: t.id, transcript_title: t.title })
-    posts.push({ platform: 'linkedin', transcript_id: t.id, transcript_title: t.title })
-    posts.push({ platform: 'twitter', topic: dnaTopics[0] || undefined })
-    posts.push({ platform: 'facebook', topic: dnaTopics[1] || undefined })
+    assignments = [0, 1, 0, 1, 0]
   } else {
-    // All 5 prompt-only
-    for (let i = 0; i < 5; i++) {
-      posts.push({ platform: platforms[i], topic: dnaTopics[i % dnaTopics.length] || undefined })
-    }
+    assignments = [0, 0, 0, 0, 0]
   }
 
+  for (let i = 0; i < 5; i++) {
+    const t = transcripts[assignments[i]]
+    posts.push({ platform: platforms[i], transcript_id: t.id, transcript_title: t.title })
+  }
   return posts
-}
-
-/**
- * Extract content pillar topics from DNA for prompt-only generation.
- */
-function extractDNATopics(dnaMarkdown: string | null): string[] {
-  if (!dnaMarkdown) return []
-
-  const strategy = extractDNASection(dnaMarkdown, 'CONTENT STRATEGY')
-  const play = extractDNASection(dnaMarkdown, 'THE PLAY')
-  const proofPoints = extractDNASection(dnaMarkdown, 'PROOF POINTS')
-
-  const topics: string[] = []
-
-  // Extract content pillars from strategy section
-  if (strategy) {
-    const pillarMatch = strategy.match(/content\s*pillars[^:]*:([\s\S]*?)(?=\n\*\*|\n##|$)/i)
-    if (pillarMatch) {
-      const pillars = pillarMatch[1]
-        .split(/\n/)
-        .map(l => l.replace(/^[-*\d.)\s]+/, '').trim())
-        .filter(l => l.length > 5 && l.length < 100)
-      topics.push(...pillars.slice(0, 5))
-    }
-  }
-
-  // If not enough, use the play section for themes
-  if (topics.length < 3 && play) {
-    const lines = play.split('\n')
-      .map(l => l.replace(/^[-*\d.)\s]+/, '').replace(/\*\*/g, '').trim())
-      .filter(l => l.length > 10 && l.length < 100 && !l.startsWith('#'))
-    topics.push(...lines.slice(0, 3))
-  }
-
-  // If still not enough, use proof points
-  if (topics.length < 3 && proofPoints) {
-    const lines = proofPoints.split('\n')
-      .map(l => l.replace(/^[-*\d.)\s]+/, '').replace(/\*\*/g, '').trim())
-      .filter(l => l.length > 10 && l.length < 100 && !l.startsWith('#'))
-    topics.push(...lines.slice(0, 3))
-  }
-
-  return topics.slice(0, 5)
 }
 
 /**
  * GET /api/cron/generate-weekly-posts
  *
- * Vercel Cron job that runs every Friday.
- * Generates 5 posts per client (2 LinkedIn, 2 X/Twitter, 1 Facebook)
- * for ALL clients that have DNA or a custom prompt.
+ * Vercel Cron job that runs every Friday 14:00 UTC.
+ * Generates 5 transcript-grounded posts per eligible client (2 LinkedIn, 2 X/Twitter, 1 Facebook).
  *
- * Clients with transcripts: uses mix of transcripts + prompt-only posts
- * Clients without transcripts: all 5 posts generated from DNA/prompt alone
+ * Clients without eligible transcripts are SKIPPED. No DNA-only generation —
+ * the generator refuses to invent facts from DNA alone. This is Rule Zero:
+ * transcripts are the only source of factual content.
  *
- * Saves to generated_content table, appends to Google Doc, notifies Slack.
+ * Saves to generated_content, appends to Google Doc, notifies Slack.
  */
 export async function GET(req: NextRequest) {
   const supabase = getSupabase()
@@ -181,11 +141,13 @@ export async function GET(req: NextRequest) {
         return { client_name: clientName, status: `skipped: phase=${client.phase}` }
       }
 
-      // Get up to 3 content transcripts (exclude onboarding/strategy)
+      // Get up to 3 content transcripts from YouTube or Drive/Deepgram
+      // (exclude onboarding/strategy recordings; min 100 chars)
       const { data: transcripts } = await supabase
         .from('client_transcripts')
         .select('id, title, transcript_text, source, relevance_tag')
         .eq('client_id', clientId)
+        .in('source', ['youtube', 'drive_deepgram'])
         .not('relevance_tag', 'in', '("onboarding","strategy")')
         .order('recorded_at', { ascending: false })
         .limit(3)
@@ -193,7 +155,12 @@ export async function GET(req: NextRequest) {
       const validTranscripts = (transcripts || [])
         .filter(t => t.transcript_text && t.transcript_text.length > 100)
 
-      // Get DNA + custom prompt
+      // Rule Zero: no transcripts → no posts. Skip the client with a clear note.
+      if (validTranscripts.length === 0) {
+        return { client_name: clientName, status: 'skipped: no eligible transcripts' }
+      }
+
+      // Get DNA + custom prompt for voice spine
       const [{ data: dna }, { data: clientPrompt }] = await Promise.all([
         supabase
           .from('client_dna')
@@ -212,153 +179,146 @@ export async function GET(req: NextRequest) {
           .maybeSingle(),
       ])
 
-      const hasCustomPrompt = !!clientPrompt?.system_prompt
-      const hasDNA = !!dna?.dna_markdown
-
-      if (!hasCustomPrompt && !hasDNA) {
-        return { client_name: clientName, status: 'skipped: no DNA or prompt' }
+      if (!clientPrompt?.system_prompt && !dna?.dna_markdown) {
+        return { client_name: clientName, status: 'skipped: no master prompt or DNA' }
       }
 
-      // Extract DNA topics for prompt-only posts
-      const dnaTopics = extractDNATopics(dna?.dna_markdown || null)
-
-      // Build the post plan
       const postPlan = buildPostPlan(
-        validTranscripts.map(t => ({ id: t.id, title: t.title })),
-        dnaTopics,
+        validTranscripts.map(t => ({ id: t.id, title: t.title || 'Untitled transcript' })),
       )
 
       const anthropic = new Anthropic({ apiKey: anthropicKey })
-      const postResults: { label: string; content: string }[] = []
-      let transcriptPosts = 0
-      let dnaPosts = 0
+      const postResults: { label: string; platform: Platform; content: string; traceback: string | null }[] = []
+
+      // Extraction cache — avoid re-extracting the same long transcript per platform.
+      const extractionCache = new Map<string, { text: string; wasExtracted: boolean }>()
+      async function processTranscript(id: string, rawText: string, title: string) {
+        const cached = extractionCache.get(id)
+        if (cached) return cached
+        if (rawText.length <= 15000) {
+          const entry = { text: rawText, wasExtracted: false }
+          extractionCache.set(id, entry)
+          return entry
+        }
+        const extraction = await extractTranscriptSignal(rawText, title, 'post_generation', anthropicKey!)
+        const entry = extraction
+          ? { text: extraction.content, wasExtracted: true }
+          : { text: rawText.slice(0, 15000), wasExtracted: false }
+        extractionCache.set(id, entry)
+        return entry
+      }
 
       // Generate each post
       for (let i = 0; i < postPlan.length; i++) {
         const plan = postPlan[i]
-        const platformRules = CC_PLATFORM_DEFAULTS[plan.platform as keyof typeof CC_PLATFORM_DEFAULTS] || ''
-
-        // Build system prompt (use master prompt if available, fallback to DNA)
-        let systemPrompt: string
-        const isPromptOnly = !plan.transcript_id
-
-        if (hasCustomPrompt) {
-          const taskDescription = isPromptOnly
-            ? `Generate a ${plan.platform.toUpperCase()} post based on your brand expertise and knowledge.`
-            : `Generate a ${plan.platform.toUpperCase()} post from the transcript below.`
-
-          systemPrompt = `${clientPrompt!.system_prompt}
-
-## TASK: ${taskDescription}
-
-Apply ALL your brand rules, compliance checks, and voice guidelines.
-
-${platformRules}
-
-CRITICAL REMINDERS:
-- NEVER use em dashes (—). Use commas, periods, colons, or semicolons.
-- NEVER use specific numbers unless DIRECTLY quoted from the transcript or system prompt.
-- NEVER use hype phrases: "game-changer," "mind-blowing," "buckle up," "let that sink in," "here's the thing," "read that again," "this is huge."
-- NEVER use generic filler: "Let me know what you think!", "Drop a comment!", "Follow for more!"
-- Output the post ONLY. No commentary, no "here's the post," no meta-notes. Ready to copy-paste.`
-        } else {
-          systemPrompt = buildFallbackPrompt(clientName, dna?.dna_markdown || null, plan.platform)
+        const transcript = validTranscripts.find(t => t.id === plan.transcript_id)
+        if (!transcript?.transcript_text) {
+          postResults.push({
+            label: `## Post ${i + 1}: ${plan.platform} (ERROR)`,
+            platform: plan.platform,
+            content: 'Transcript text missing at runtime.',
+            traceback: null,
+          })
+          continue
         }
 
-        // Build user prompt
+        const processed = await processTranscript(plan.transcript_id, transcript.transcript_text, plan.transcript_title)
+
+        // Load up to 3 recent approved posts (STYLE-only) for this platform.
+        const recentApprovedPosts = await loadRecentApprovedExamples(supabase, clientId, plan.platform, 3)
+
+        // Build the Rule-Zero prompts.
+        let systemPrompt: string
         let userPrompt: string
-
-        if (isPromptOnly) {
-          userPrompt = `Write ONE original ${plan.platform} post as ${clientName}.
-
-${plan.topic ? `Topic/theme to focus on: ${plan.topic}` : 'Pick the single most compelling topic from the content pillars, proof points, or unique mechanisms in your system prompt.'}
-
-Use the voice, stories, proof points, and content strategy from the system prompt. Go DEEP on one specific idea.
-
-CRITICAL:
-- Do NOT invent specific numbers, client names, or case study details not in the system prompt.
-- Use only facts, metrics, and examples that appear in the system prompt.
-- Write from first person as ${clientName} sharing expertise.
-- This is post ${i + 1} of 5 for this week. Cover a DIFFERENT topic than any previous post would cover.
-- Output the post only. Ready to publish. No preamble.`
-          dnaPosts++
-        } else {
-          // Get transcript text
-          const transcript = validTranscripts.find(t => t.id === plan.transcript_id)
-          const transcriptText = transcript?.transcript_text?.slice(0, 15000) || ''
-
-          userPrompt = `Transcript from "${plan.transcript_title}":
-
----
-${transcriptText}
----
-
-Write ONE ${plan.platform} post from this transcript. Pick the single most compelling, unique, or valuable idea and go DEEP on it.
-
-IMPORTANT: This is post ${i + 1} of 5 for this week. Cover a DIFFERENT angle than posts from the same transcript. Focus on what works best for ${plan.platform}'s audience and format.
-
-Output the post only. Ready to publish. No preamble.`
-          transcriptPosts++
+        try {
+          const inputs = {
+            clientName,
+            platform: plan.platform,
+            masterPrompt: clientPrompt?.system_prompt || null,
+            dnaDocText: null, // Phase 3 will populate
+            dnaMarkdown: dna?.dna_markdown || null, // Phase 1 legacy fallback
+            knowledgeNotes: null, // Phase 4 will populate
+            recentApprovedPosts,
+            transcriptText: processed.text,
+            transcriptTitle: plan.transcript_title,
+            wasExtracted: processed.wasExtracted,
+          }
+          systemPrompt = buildGenerationSystemPrompt(inputs)
+          userPrompt = buildGenerationUserPrompt(inputs)
+        } catch (err) {
+          // MissingVoiceError should have been caught above (we check master/DNA),
+          // but defend here for completeness.
+          if (err instanceof MissingVoiceError) {
+            return { client_name: clientName, status: `skipped: ${err.message}` }
+          }
+          throw err
         }
 
         try {
-          const PLATFORM_MAX_TOKENS: Record<string, number> = {
-            linkedin: 1800,
-            twitter: 600,
-            facebook: 1200,
-          }
-
-          const message = await anthropic.messages.create({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: PLATFORM_MAX_TOKENS[plan.platform] || 1500,
-            system: systemPrompt,
+          const stream = anthropic.messages.stream({
+            model: POSTGEN_MODEL,
+            max_tokens: PLATFORM_MAX_TOKENS[plan.platform],
+            system: [
+              {
+                type: 'text',
+                text: systemPrompt,
+                cache_control: { type: 'ephemeral' },
+              },
+            ],
             messages: [{ role: 'user', content: userPrompt }],
           })
 
-          const rawContent = message.content
-            .filter(b => b.type === 'text')
-            .map(b => b.text)
+          const finalMessage = await stream.finalMessage()
+          const rawText = finalMessage.content
+            .filter(block => block.type === 'text')
+            .map(block => (block as { type: 'text'; text: string }).text)
             .join('')
 
-          const cleanedContent = ccPostProcess(rawContent)
-          const source = isPromptOnly
-            ? `DNA-based${plan.topic ? `: ${plan.topic.slice(0, 40)}` : ''}`
-            : `from "${plan.transcript_title}"`
+          const { draft, traceback, matchedContract } = extractDraft(rawText)
+          if (!matchedContract) {
+            console.warn(
+              `[cron] ${plan.platform} post ${i + 1} for ${clientName} did not match <draft>/<traceback> contract; using raw output.`,
+            )
+          }
 
+          const cleanedContent = ccPostProcess(draft)
           const platformLabel = plan.platform === 'linkedin' ? 'LinkedIn'
             : plan.platform === 'twitter' ? 'X/Twitter' : 'Facebook'
 
           postResults.push({
-            label: `## Post ${i + 1}: ${platformLabel} (${source})`,
+            label: `## Post ${i + 1}: ${platformLabel} (from "${plan.transcript_title}")`,
+            platform: plan.platform,
             content: cleanedContent,
+            traceback,
           })
         } catch (err) {
           console.error(`[cron] Error generating post ${i + 1} for ${clientName}:`, err)
           postResults.push({
             label: `## Post ${i + 1}: ${plan.platform} (ERROR)`,
+            platform: plan.platform,
             content: `Generation failed: ${err instanceof Error ? err.message : 'unknown error'}`,
+            traceback: null,
           })
         }
       }
 
-      // Combine all posts into markdown
+      // Combine all posts into markdown (drafts only — traceback is separate).
       const combinedMarkdown = postResults
         .map(p => `${p.label}\n\n${p.content}`)
         .join('\n\n---\n\n')
 
-      // Save to generated_content
-      const transcriptTitles = Array.from(
-        new Set(postPlan.filter(p => p.transcript_title).map(p => p.transcript_title!))
-      )
-      const sourceList = [
-        ...transcriptTitles,
-        ...(dnaPosts > 0 ? [`${dnaPosts} DNA-based`] : []),
-      ].join(', ')
+      // Summarize tracebacks as a compact audit trail for the generated_content row + Slack.
+      const tracebackCount = postResults.filter(p => p.traceback).length
+      const tracebackSummary = `${tracebackCount}/${postResults.length} drafts emitted tracebacks`
 
+      // Save to generated_content with tracebacks in metadata for later audit.
+      const transcriptTitles = Array.from(
+        new Set(postPlan.map(p => p.transcript_title)),
+      )
       const { data: savedContent } = await supabase.from('generated_content').insert({
         client_id: clientId,
         content_type: 'social_posts',
-        source_title: sourceList,
+        source_title: transcriptTitles.join(', '),
         platforms: ['linkedin', 'twitter', 'facebook'],
         content_markdown: combinedMarkdown,
         generated_by: 'weekly_cron',
@@ -384,9 +344,9 @@ Output the post only. Ready to publish. No preamble.`
       // Insert each post as a content example
       const contentExampleRows = postResults
         .filter(p => !p.label.includes('ERROR'))
-        .map((p, idx) => ({
+        .map(p => ({
           client_id: clientId,
-          platform: postPlan[idx]?.platform || 'multi',
+          platform: p.platform,
           content_type: 'ai_generated',
           title: p.content.slice(0, 80),
           content: p.content,
@@ -416,9 +376,8 @@ Output the post only. Ready to publish. No preamble.`
         client_name: clientName,
         status: 'generated',
         post_count: postResults.length,
-        transcript_posts: transcriptPosts,
-        dna_posts: dnaPosts,
         doc_url: docUrl,
+        traceback_summary: tracebackSummary,
       }
     }
 
@@ -437,14 +396,12 @@ Output the post only. Ready to publish. No preamble.`
       const errors = results.filter(r => r.status.startsWith('error'))
 
       const totalPosts = generated.reduce((sum, r) => sum + (r.post_count || 0), 0)
-      const totalTranscriptPosts = generated.reduce((sum, r) => sum + (r.transcript_posts || 0), 0)
-      const totalDNAPosts = generated.reduce((sum, r) => sum + (r.dna_posts || 0), 0)
 
       const slackMessage = {
-        text: `:memo: *Weekly Written Posts Generated*\n\n` +
-          `*Total:* ${totalPosts} posts for ${generated.length} clients (${totalTranscriptPosts} from transcripts, ${totalDNAPosts} from DNA)\n\n` +
+        text: `:memo: *Weekly Written Posts — Rule Zero generator*\n\n` +
+          `*Total:* ${totalPosts} posts for ${generated.length} clients (every claim traced to a transcript)\n\n` +
           (generated.length > 0 ? generated.map(r =>
-            `  :white_check_mark: ${r.client_name} (${r.post_count} posts: ${r.transcript_posts} transcript, ${r.dna_posts} DNA)${r.doc_url ? ` - <${r.doc_url}|Open Doc>` : ''}`
+            `  :white_check_mark: ${r.client_name} — ${r.post_count} posts${r.doc_url ? ` · <${r.doc_url}|Open Doc>` : ''}${r.traceback_summary ? ` · _${r.traceback_summary}_` : ''}`
           ).join('\n') + '\n' : '') +
           (skipped.length > 0 ? `\n*Skipped:* ${skipped.length}\n${skipped.map(r => `  :fast_forward: ${r.client_name}: ${r.status}`).join('\n')}\n` : '') +
           (errors.length > 0 ? `\n*Errors:* ${errors.length}\n${errors.map(r => `  :x: ${r.client_name}: ${r.status}`).join('\n')}\n` : '') +
