@@ -42,8 +42,13 @@ interface TranscribeResult {
 export async function GET(req: NextRequest) {
   const supabase = getSupabase()
   const authHeader = req.headers.get('authorization')
-  const cronSecret = process.env.CRON_SECRET
-  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+  // Accept either the cc-qc-tool-scoped CRON_SECRET_1 (for manual curls) or the
+  // legacy shared CRON_SECRET (which Vercel's built-in cron scheduler sends
+  // automatically). Both are valid; header must match at least one.
+  const acceptable = [process.env.CRON_SECRET_1, process.env.CRON_SECRET]
+    .filter((s): s is string => !!s)
+    .map(s => `Bearer ${s}`)
+  if (acceptable.length > 0 && !acceptable.includes(authHeader || '')) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 

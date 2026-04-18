@@ -13,10 +13,13 @@ function getSupabase() {
 
 export async function GET(req: NextRequest) {
   const supabase = getSupabase()
-  // Verify cron secret (Vercel sends this automatically for cron jobs)
+  // Accept either the cc-qc-tool-scoped CRON_SECRET_1 or the legacy shared
+  // CRON_SECRET that Vercel's built-in cron scheduler still sends.
   const authHeader = req.headers.get('authorization')
-  const cronSecret = process.env.CRON_SECRET
-  if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+  const acceptable = [process.env.CRON_SECRET_1, process.env.CRON_SECRET]
+    .filter((s): s is string => !!s)
+    .map(s => `Bearer ${s}`)
+  if (acceptable.length > 0 && !acceptable.includes(authHeader || '')) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
