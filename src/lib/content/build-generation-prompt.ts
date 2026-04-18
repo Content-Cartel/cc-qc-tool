@@ -173,10 +173,34 @@ ${notes.trim()}
 The corrections above come from recent human feedback on ${ 'this client' }'s posts. Apply them.`
 }
 
-function buildOutputContract(platform: Platform): string {
+function buildOutputContract(platform: Platform, hasCompliance: boolean): string {
+  const complianceBlock = hasCompliance
+    ? `
+
+<compliance_check>
+One line per rule in RULE TWO, in the same order as RULE TWO lists them. Format for each line:
+- <SHORT RULE NAME>: compliant <YES|NO> — <one sentence explaining why, citing the specific check>
+
+If a rule includes a required action (e.g., "insert [LEGAL REVIEW REQUIRED] before any yield claim"), state both the TRIGGER (was the action required in this post?) and the RESULT (was it performed?). Example:
+- YIELD FLAG RULE: compliant YES — post does not mention a yield %, so the header was not required.
+- YIELD FLAG RULE: compliant YES — yield of 8% appears in paragraph 2; [LEGAL REVIEW REQUIRED — JEFF SIGN-OFF] header is present on the line immediately before that paragraph.
+- YIELD FLAG RULE: compliant NO — yield of 8% mentioned but required [LEGAL REVIEW REQUIRED] header is missing. REWRITE.
+
+If ANY line resolves to NO, you violated Rule Two — rewrite the <draft> and redo the <compliance_check> before emitting. Only emit the response when every line is YES.
+</compliance_check>`
+    : ''
+
+  const tagList = hasCompliance
+    ? 'EXACTLY three XML tags, in this order'
+    : 'EXACTLY two XML tags, in this order'
+
+  const callerStripNote = hasCompliance
+    ? 'The caller will strip <traceback> and <compliance_check> before saving. They exist so humans can audit that every claim is real and every compliance rule passes.'
+    : 'The caller will strip <traceback> before saving. It exists so humans can audit that every claim is real.'
+
   return `═══ OUTPUT CONTRACT ═══
 
-Emit EXACTLY two XML tags, in this order, with nothing before, between, or after:
+Emit ${tagList}, with nothing before, between, or after:
 
 <draft>
 The final ${PLATFORM_LABEL[platform]} post, ready to copy-paste. ${PLATFORM_CHAR_RANGE[platform]}. No meta-commentary, no "here's the post", no preamble.
@@ -187,9 +211,9 @@ The final ${PLATFORM_LABEL[platform]} post, ready to copy-paste. ${PLATFORM_CHAR
 - CLAIM: "<brief quote or paraphrase from your draft>" → TRANSCRIPT: "<supporting phrase from transcript>"
 
 If any claim in your draft has no transcript support, you violated Rule Zero — rewrite the draft and redo the traceback before emitting.
-</traceback>
+</traceback>${complianceBlock}
 
-The caller will strip <traceback> before saving. It exists so humans can audit that every claim is real.`
+${callerStripNote}`
 }
 
 function buildComplianceRules(rules: string | null): string | null {
@@ -209,28 +233,28 @@ ${rules.trim()}
 Before emitting <draft>, silently re-read your draft against EVERY rule above, word by word. If ANY rule is violated — banned phrase appears, required header missing, banned frame used — rewrite the draft until clean. Only emit when every rule is satisfied. If reframing is impossible without hallucinating, drop the offending section rather than violate a rule.`
 }
 
-function buildSelfCheck(): string {
+function buildSelfCheck(hasCompliance: boolean): string {
+  const complianceStep = hasCompliance
+    ? `
+
+Before emitting <draft>, mentally fill in <compliance_check> first, one line per RULE TWO item. If ANY line would resolve to NO, rewrite the draft. Only proceed to emit once every line resolves to YES.`
+    : ''
+
   return `═══ FINAL SELF-CHECK (SILENT — DO NOT OUTPUT) ═══
 
 Before emitting <draft>, do a word-by-word re-read checking for these SPECIFIC failure modes, in order:
 
-1. SCAN FOR BANNED PHRASES. Rule Two lists client-specific banned phrases. Search your draft for EACH banned phrase literally, character by character. If any appear, rewrite.
+1. CHECK THE CTA. Does it tie to THIS post's specific pain or opportunity? Or is it a canned "schedule a call" that could ride the back of any post? If generic, rewrite.
 
-2. SCAN FOR BANNED FRAMES. Even without the exact banned phrase, check if your POST'S FRAMING matches a banned frame. Example: if Rule Two bans "constitutional originalism framing" and your hook is "Article 1 Section 10 mandates...", that's the banned frame even without the exact phrase. REFRAME.
+2. CHECK FOR DUPLICATE HOOK. Your <angle_focus> told you the angle for THIS post — a different angle than the other posts in this batch. If your draft's hook sounds like a generic take on the topic rather than THIS specific angle, rewrite.
 
-3. SCAN FOR REQUIRED HEADERS. Rule Two may require specific inline headers (e.g., [LEGAL REVIEW REQUIRED] before any yield claim). If a sentence triggers the rule, confirm the header is present VERBATIM on its own line immediately before.
+3. CHECK TONE. Does it sound like the speaker actually sounded on the transcript? Or does it sound generic-AI?
 
-4. CHECK THE CTA. Does it tie to THIS post's specific pain or opportunity? Or is it a canned "schedule a call" that could ride the back of any post? If generic, rewrite.
+4. CHECK FACTS. Every number, name, quote, claim traces to the transcript?
 
-5. CHECK FOR DUPLICATE HOOK. Your <angle_focus> told you the angle for THIS post — a different angle than the other posts in this batch. If your draft's hook sounds like a generic take on the topic rather than THIS specific angle, rewrite.
+5. CHECK BASIC RULES. No em-dashes, no hype phrases ("game-changer", "mind-blowing", "buckle up", etc.), no generic filler, no invented numbers, no "fatal flaw / elegantly simple / perfectly / only one that works" superlatives.${complianceStep}
 
-6. CHECK TONE. Does it sound like the speaker actually sounded on the transcript? Or does it sound generic-AI?
-
-7. CHECK FACTS. Every number, name, quote, claim traces to the transcript?
-
-8. CHECK BASIC RULES. No em-dashes, no hype phrases ("game-changer", "mind-blowing", "buckle up", etc.), no generic filler, no invented numbers, no "fatal flaw / elegantly simple / perfectly / only one that works" superlatives.
-
-If ANY check fails, rewrite and re-check the whole list. Only emit <draft> once the draft passes every check. Then emit <traceback>.`
+If ANY check fails, rewrite and re-check the whole list.`
 }
 
 /**
@@ -253,8 +277,9 @@ export function buildGenerationSystemPrompt(i: GenerationInputs): string {
   if (examples) blocks.push(examples)
   const corrections = buildKnowledgeNotes(i.knowledgeNotes)
   if (corrections) blocks.push(corrections)
-  blocks.push(buildOutputContract(i.platform))
-  blocks.push(buildSelfCheck())
+  const hasCompliance = Boolean(i.complianceRules && i.complianceRules.trim())
+  blocks.push(buildOutputContract(i.platform, hasCompliance))
+  blocks.push(buildSelfCheck(hasCompliance))
   return blocks.join('\n\n')
 }
 
@@ -291,19 +316,53 @@ Remember Rule Zero: only facts from the transcript. Follow the output contract e
 }
 
 /**
- * Strip the <traceback> block from a generated response and return just the
- * <draft> content. If the response doesn't match the contract, returns the
- * full response as-is so the caller can surface it for debugging.
+ * Strip the <traceback> and <compliance_check> blocks from a generated response
+ * and return the clean <draft> content + audit metadata. If the response doesn't
+ * match the contract, returns the full response so the caller can surface it.
+ *
+ * `violationCount` is the number of compliance_check lines containing " NO"
+ * (case-insensitive). A non-zero count means the model self-reported a rule
+ * failure — caller should flag the post for human review rather than block it.
  */
-export function extractDraft(response: string): { draft: string; traceback: string | null; matchedContract: boolean } {
+export function extractDraft(response: string): {
+  draft: string
+  traceback: string | null
+  complianceCheck: string | null
+  violationCount: number
+  matchedContract: boolean
+} {
   const draftMatch = response.match(/<draft>([\s\S]*?)<\/draft>/i)
   const tracebackMatch = response.match(/<traceback>([\s\S]*?)<\/traceback>/i)
+  const complianceMatch = response.match(/<compliance_check>([\s\S]*?)<\/compliance_check>/i)
+
   if (!draftMatch) {
-    return { draft: response.trim(), traceback: null, matchedContract: false }
+    return {
+      draft: response.trim(),
+      traceback: null,
+      complianceCheck: null,
+      violationCount: 0,
+      matchedContract: false,
+    }
   }
+
+  const complianceCheck = complianceMatch ? complianceMatch[1].trim() : null
+  let violationCount = 0
+  if (complianceCheck) {
+    for (const line of complianceCheck.split('\n')) {
+      const trimmed = line.trim()
+      if (!trimmed) continue
+      // Match "compliant NO" (case-insensitive) as the self-reported failure marker.
+      if (/compliant\s+NO\b/i.test(trimmed)) {
+        violationCount += 1
+      }
+    }
+  }
+
   return {
     draft: draftMatch[1].trim(),
     traceback: tracebackMatch ? tracebackMatch[1].trim() : null,
+    complianceCheck,
+    violationCount,
     matchedContract: Boolean(draftMatch && tracebackMatch),
   }
 }

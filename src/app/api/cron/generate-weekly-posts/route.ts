@@ -47,6 +47,10 @@ interface ClientResult {
   doc_url?: string
   /** Brief summary of each traceback so the Slack note/log shows audit trail existed. */
   traceback_summary?: string
+  /** Count of posts where the model self-reported a compliance rule failure (compliant NO). */
+  violation_post_count?: number
+  /** Count of total compliance-rule failures across all posts for this client. */
+  total_violation_count?: number
 }
 
 /**
@@ -330,10 +334,19 @@ export async function GET(req: NextRequest) {
             .map(block => (block as { type: 'text'; text: string }).text)
             .join('')
 
-          const { draft, traceback, matchedContract } = extractDraft(rawText)
+          const { draft, traceback, complianceCheck, violationCount, matchedContract } = extractDraft(rawText)
           if (!matchedContract) {
             console.warn(
               `[cron] ${plan.platform} post ${i + 1} for ${clientName} did not match <draft>/<traceback> contract; using raw output.`,
+            )
+          }
+          if (violationCount > 0) {
+            console.warn(
+              `[cron] ${plan.platform} post ${i + 1} for ${clientName} self-reported ${violationCount} compliance violation(s). compliance_check:\n${complianceCheck || '(missing)'}`,
+            )
+          } else if (complianceCheck) {
+            console.log(
+              `[cron] ${plan.platform} post ${i + 1} for ${clientName} — compliance check clean (${complianceCheck.split('\n').filter(l => l.trim()).length} rules passed).`,
             )
           }
 
@@ -346,6 +359,8 @@ export async function GET(req: NextRequest) {
             platform: plan.platform,
             content: cleanedContent,
             traceback,
+            complianceCheck,
+            violationCount,
           }
         } catch (err) {
           console.error(`[cron] Error generating post ${i + 1} for ${clientName}:`, err)
@@ -354,6 +369,8 @@ export async function GET(req: NextRequest) {
             platform: plan.platform,
             content: `Generation failed: ${err instanceof Error ? err.message : 'unknown error'}`,
             traceback: null as string | null,
+            complianceCheck: null as string | null,
+            violationCount: 0,
           }
         }
       }
@@ -419,6 +436,8 @@ export async function GET(req: NextRequest) {
 
       // Group the successful posts by platform so each platform lands in its
       // own sub-tab under the week parent tab in the client's Google Doc.
+      // Posts where the model self-reported a compliance violation get a
+      // visible warning line prepended — the human QC pass sees it immediately.
       const postsByPlatform: Record<Platform, string[]> = {
         linkedin: [],
         twitter: [],
@@ -426,9 +445,17 @@ export async function GET(req: NextRequest) {
       }
       for (const p of postResults) {
         if (!p.label.includes('ERROR')) {
-          postsByPlatform[p.platform].push(p.content)
+          const violations = p.violationCount ?? 0
+          const body = violations > 0
+            ? `⚠️ COMPLIANCE CHECK FAILED (${violations} rule${violations === 1 ? '' : 's'}) — review before publishing\n\n${p.content}`
+            : p.content
+          postsByPlatform[p.platform].push(body)
         }
       }
+
+      // Aggregate violation stats for the Slack summary.
+      const violationPostCount = postResults.filter(p => (p.violationCount ?? 0) > 0).length
+      const totalViolationCount = postResults.reduce((sum, p) => sum + (p.violationCount ?? 0), 0)
 
       // Append to Google Doc using the Week → Platform tab hierarchy.
       let docUrl: string | undefined
@@ -451,6 +478,8 @@ export async function GET(req: NextRequest) {
         post_count: postResults.length,
         doc_url: docUrl,
         traceback_summary: tracebackSummary,
+        violation_post_count: violationPostCount,
+        total_violation_count: totalViolationCount,
       }
     }
 
@@ -469,13 +498,25 @@ export async function GET(req: NextRequest) {
       const errors = results.filter(r => r.status.startsWith('error'))
 
       const totalPosts = generated.reduce((sum, r) => sum + (r.post_count || 0), 0)
+      const totalFlaggedPosts = generated.reduce((sum, r) => sum + (r.violation_post_count || 0), 0)
+      const flaggedClients = generated.filter(r => (r.violation_post_count || 0) > 0)
+
+      const formatClientLine = (r: ClientResult) => {
+        const base = `  :white_check_mark: ${r.client_name} — ${r.post_count} posts${r.doc_url ? ` · <${r.doc_url}|Open Doc>` : ''}${r.traceback_summary ? ` · _${r.traceback_summary}_` : ''}`
+        const flagged = r.violation_post_count || 0
+        if (flagged > 0) {
+          return `${base}\n    :warning: ${flagged}/${r.post_count} posts flagged for compliance review (${r.total_violation_count || 0} rule failures total)`
+        }
+        return base
+      }
 
       const slackMessage = {
         text: `:memo: *Weekly Written Posts — Rule Zero generator*\n\n` +
-          `*Total:* ${totalPosts} posts for ${generated.length} clients (every claim traced to a transcript)\n\n` +
-          (generated.length > 0 ? generated.map(r =>
-            `  :white_check_mark: ${r.client_name} — ${r.post_count} posts${r.doc_url ? ` · <${r.doc_url}|Open Doc>` : ''}${r.traceback_summary ? ` · _${r.traceback_summary}_` : ''}`
-          ).join('\n') + '\n' : '') +
+          `*Total:* ${totalPosts} posts for ${generated.length} clients (every claim traced to a transcript)\n` +
+          (totalFlaggedPosts > 0
+            ? `*Compliance:* :warning: ${totalFlaggedPosts} posts across ${flaggedClients.length} clients flagged — human QC required before publishing\n\n`
+            : `*Compliance:* :white_check_mark: all posts passed self-check\n\n`) +
+          (generated.length > 0 ? generated.map(formatClientLine).join('\n') + '\n' : '') +
           (skipped.length > 0 ? `\n*Skipped:* ${skipped.length}\n${skipped.map(r => `  :fast_forward: ${r.client_name}: ${r.status}`).join('\n')}\n` : '') +
           (errors.length > 0 ? `\n*Errors:* ${errors.length}\n${errors.map(r => `  :x: ${r.client_name}: ${r.status}`).join('\n')}\n` : '') +
           `\nReview the docs and send to scheduler when ready.`,

@@ -192,6 +192,8 @@ export async function POST(req: NextRequest) {
 
         const platformResults: Record<string, string> = {}
         const platformTracebacks: Record<string, string | null> = {}
+        const platformComplianceChecks: Record<string, string | null> = {}
+        const platformViolationCounts: Record<string, number> = {}
 
         for (const platform of platforms) {
           sendEvent('progress', {
@@ -254,16 +256,27 @@ export async function POST(req: NextRequest) {
             .map(block => (block as { type: 'text'; text: string }).text)
             .join('')
 
-          const { draft, traceback, matchedContract } = extractDraft(rawText)
+          const { draft, traceback, complianceCheck, violationCount, matchedContract } = extractDraft(rawText)
           if (!matchedContract) {
             console.warn(
               `[generate-posts] ${platform} response did not match <draft>/<traceback> contract for client ${client_id}. Falling back to raw output.`,
+            )
+          }
+          if (violationCount > 0) {
+            console.warn(
+              `[generate-posts] ${platform} post for client ${client_id} self-reported ${violationCount} compliance violation(s). compliance_check:\n${complianceCheck || '(missing)'}`,
+            )
+          } else if (complianceCheck) {
+            console.log(
+              `[generate-posts] ${platform} post for client ${client_id} — compliance check clean (${complianceCheck.split('\n').filter(l => l.trim()).length} rules passed).`,
             )
           }
 
           const cleanedDraft = ccPostProcess(draft)
           platformResults[platform] = cleanedDraft
           platformTracebacks[platform] = traceback
+          platformComplianceChecks[platform] = complianceCheck
+          platformViolationCounts[platform] = violationCount
 
           // Emit the final draft as a single text event. Frontend accumulates text events.
           sendEvent('text', { content: cleanedDraft, platform })
@@ -289,6 +302,11 @@ export async function POST(req: NextRequest) {
           // saved content. Surfaced in done event so the UI can optionally
           // display them (Phase 1: hidden from PM view).
           platform_tracebacks: platformTracebacks,
+          // Compliance-check audit: one YES/NO line per RULE TWO item.
+          // violationCount > 0 means the model self-reported a rule failure —
+          // human QC should review before publishing.
+          platform_compliance_checks: platformComplianceChecks,
+          platform_violation_counts: platformViolationCounts,
         })
 
         controller.close()
