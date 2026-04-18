@@ -9,12 +9,13 @@ import {
   extractDraft,
   MissingVoiceError,
   type Platform,
+  type ContentExampleRow,
 } from '@/lib/content/build-generation-prompt'
 import { loadRecentApprovedExamples } from '@/lib/content/approved-examples'
 import { POSTGEN_MODEL } from '@/lib/content/postgen-model'
 import { extractTranscriptSignal } from '@/lib/content/transcript-extractor'
 
-export const maxDuration = 300 // 5 min for batch processing
+export const maxDuration = 600 // 10 min — 14 posts × 10+ clients needs headroom even with per-client parallelism
 export const dynamic = 'force-dynamic'
 
 function getSupabase() {
@@ -189,71 +190,70 @@ export async function GET(req: NextRequest) {
       )
 
       const anthropic = new Anthropic({ apiKey: anthropicKey })
-      const postResults: { label: string; platform: Platform; content: string; traceback: string | null }[] = []
 
-      // Extraction cache — avoid re-extracting the same long transcript per platform.
-      const extractionCache = new Map<string, { text: string; wasExtracted: boolean }>()
-      async function processTranscript(id: string, rawText: string, title: string) {
-        const cached = extractionCache.get(id)
-        if (cached) return cached
-        if (rawText.length <= 15000) {
-          const entry = { text: rawText, wasExtracted: false }
-          extractionCache.set(id, entry)
-          return entry
-        }
-        const extraction = await extractTranscriptSignal(rawText, title, 'post_generation', anthropicKey!)
-        const entry = extraction
-          ? { text: extraction.content, wasExtracted: true }
-          : { text: rawText.slice(0, 15000), wasExtracted: false }
-        extractionCache.set(id, entry)
-        return entry
+      // Pre-extract all unique transcripts used in the plan BEFORE the parallel
+      // post loop, so Haiku extraction happens once per transcript even when
+      // multiple posts draw from the same source.
+      const uniqueTranscriptIds = Array.from(new Set(postPlan.map(p => p.transcript_id)))
+      const extractionByTranscript = new Map<string, { text: string; wasExtracted: boolean }>()
+      await Promise.all(
+        uniqueTranscriptIds.map(async (tid) => {
+          const t = validTranscripts.find(v => v.id === tid)
+          if (!t?.transcript_text) {
+            extractionByTranscript.set(tid, { text: '', wasExtracted: false })
+            return
+          }
+          if (t.transcript_text.length <= 15000) {
+            extractionByTranscript.set(tid, { text: t.transcript_text, wasExtracted: false })
+            return
+          }
+          const extraction = await extractTranscriptSignal(
+            t.transcript_text, t.title || 'Untitled', 'post_generation', anthropicKey!,
+          )
+          extractionByTranscript.set(tid,
+            extraction
+              ? { text: extraction.content, wasExtracted: true }
+              : { text: t.transcript_text.slice(0, 15000), wasExtracted: false },
+          )
+        }),
+      )
+
+      // Load the 3 recent approved examples for each platform ONCE per client.
+      const approvedByPlatform: Record<Platform, ContentExampleRow[]> = {
+        linkedin: await loadRecentApprovedExamples(supabase, clientId, 'linkedin', 3),
+        twitter: await loadRecentApprovedExamples(supabase, clientId, 'twitter', 3),
+        facebook: await loadRecentApprovedExamples(supabase, clientId, 'facebook', 3),
       }
 
-      // Generate each post
-      for (let i = 0; i < postPlan.length; i++) {
-        const plan = postPlan[i]
+      // Generate all posts IN PARALLEL. Anthropic handles per-tier rate limits;
+      // Sonnet 4.5 tiers allow well beyond 14 concurrent calls.
+      const generatePost = async (plan: PostPlan, i: number) => {
         const transcript = validTranscripts.find(t => t.id === plan.transcript_id)
         if (!transcript?.transcript_text) {
-          postResults.push({
+          return {
             label: `## Post ${i + 1}: ${plan.platform} (ERROR)`,
             platform: plan.platform,
             content: 'Transcript text missing at runtime.',
-            traceback: null,
-          })
-          continue
+            traceback: null as string | null,
+          }
         }
 
-        const processed = await processTranscript(plan.transcript_id, transcript.transcript_text, plan.transcript_title)
+        const processed = extractionByTranscript.get(plan.transcript_id)!
 
-        // Load up to 3 recent approved posts (STYLE-only) for this platform.
-        const recentApprovedPosts = await loadRecentApprovedExamples(supabase, clientId, plan.platform, 3)
-
-        // Build the Rule-Zero prompts.
-        let systemPrompt: string
-        let userPrompt: string
-        try {
-          const inputs = {
-            clientName,
-            platform: plan.platform,
-            masterPrompt: clientPrompt?.system_prompt || null,
-            dnaDocText: null, // Phase 3 will populate
-            dnaMarkdown: dna?.dna_markdown || null, // Phase 1 legacy fallback
-            knowledgeNotes: null, // Phase 4 will populate
-            recentApprovedPosts,
-            transcriptText: processed.text,
-            transcriptTitle: plan.transcript_title,
-            wasExtracted: processed.wasExtracted,
-          }
-          systemPrompt = buildGenerationSystemPrompt(inputs)
-          userPrompt = buildGenerationUserPrompt(inputs)
-        } catch (err) {
-          // MissingVoiceError should have been caught above (we check master/DNA),
-          // but defend here for completeness.
-          if (err instanceof MissingVoiceError) {
-            return { client_name: clientName, status: `skipped: ${err.message}` }
-          }
-          throw err
+        const inputs = {
+          clientName,
+          platform: plan.platform,
+          masterPrompt: clientPrompt?.system_prompt || null,
+          dnaDocText: null, // Phase 3 will populate
+          dnaMarkdown: dna?.dna_markdown || null, // Phase 1 legacy fallback
+          knowledgeNotes: null, // Phase 4 will populate
+          recentApprovedPosts: approvedByPlatform[plan.platform],
+          transcriptText: processed.text,
+          transcriptTitle: plan.transcript_title,
+          wasExtracted: processed.wasExtracted,
         }
+        const systemPrompt = buildGenerationSystemPrompt(inputs)
+        const userPrompt = buildGenerationUserPrompt(inputs)
 
         try {
           const stream = anthropic.messages.stream({
@@ -286,22 +286,24 @@ export async function GET(req: NextRequest) {
           const platformLabel = plan.platform === 'linkedin' ? 'LinkedIn'
             : plan.platform === 'twitter' ? 'X/Twitter' : 'Facebook'
 
-          postResults.push({
+          return {
             label: `## Post ${i + 1}: ${platformLabel} (from "${plan.transcript_title}")`,
             platform: plan.platform,
             content: cleanedContent,
             traceback,
-          })
+          }
         } catch (err) {
           console.error(`[cron] Error generating post ${i + 1} for ${clientName}:`, err)
-          postResults.push({
+          return {
             label: `## Post ${i + 1}: ${plan.platform} (ERROR)`,
             platform: plan.platform,
             content: `Generation failed: ${err instanceof Error ? err.message : 'unknown error'}`,
-            traceback: null,
-          })
+            traceback: null as string | null,
+          }
         }
       }
+
+      const postResults = await Promise.all(postPlan.map((plan, i) => generatePost(plan, i)))
 
       // Combine all posts into markdown (drafts only — traceback is separate).
       const combinedMarkdown = postResults
