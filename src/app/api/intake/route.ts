@@ -1,10 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-)
+export const dynamic = 'force-dynamic'
+
+function getSupabase() {
+  return createClient(
+    (process.env.NEXT_PUBLIC_SUPABASE_URL_1 || process.env.NEXT_PUBLIC_SUPABASE_URL)!,
+    (process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY_1 || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY)!
+  )
+}
 
 function cleanFileName(name: string): string {
   return name
@@ -15,6 +19,7 @@ function cleanFileName(name: string): string {
 }
 
 export async function POST(req: NextRequest) {
+  const supabase = getSupabase()
   try {
     // Validate webhook secret
     const secret = req.headers.get('x-webhook-secret')

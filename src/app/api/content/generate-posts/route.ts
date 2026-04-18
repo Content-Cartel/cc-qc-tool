@@ -1,47 +1,65 @@
 import { NextRequest } from 'next/server'
 import Anthropic from '@anthropic-ai/sdk'
 import { createClient } from '@supabase/supabase-js'
-import { ccPostProcess, CC_PLATFORM_DEFAULTS } from '@/lib/content/cc-rules'
-import { buildFallbackPrompt } from '@/lib/content/fallback-prompt'
+import { ccPostProcess } from '@/lib/content/cc-rules'
 import { extractTranscriptSignal } from '@/lib/content/transcript-extractor'
+import {
+  buildGenerationSystemPrompt,
+  buildGenerationUserPrompt,
+  extractDraft,
+  MissingTranscriptError,
+  MissingVoiceError,
+  type Platform,
+} from '@/lib/content/build-generation-prompt'
+import { loadRecentApprovedExamples } from '@/lib/content/approved-examples'
+import { POSTGEN_MODEL } from '@/lib/content/postgen-model'
 
 export const maxDuration = 180
+export const dynamic = 'force-dynamic'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-)
+function getSupabase() {
+  return createClient(
+    (process.env.NEXT_PUBLIC_SUPABASE_URL_1 || process.env.NEXT_PUBLIC_SUPABASE_URL)!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY_1 || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY_1 || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
+}
 
 interface GeneratePostsRequest {
   client_id: number
   transcript_id?: string      // from client_transcripts table
   submission_id?: string      // from qc_submissions table (uses its transcript)
-  topic?: string              // for prompt-only generation (no transcript needed)
-  platforms: ('linkedin' | 'twitter' | 'facebook')[]
+  platforms: Platform[]
+  /** Include 2–3 recent approved posts as STYLE-only few-shot. Default true. */
+  include_few_shot?: boolean
 }
 
 /**
  * Platform-specific max tokens. Tighter budgets = more focused output.
+ * Includes headroom for the <traceback> block which is emitted alongside
+ * the draft and stripped server-side before saving.
  */
-const PLATFORM_MAX_TOKENS: Record<string, number> = {
-  linkedin: 1800,
-  twitter: 600,
-  facebook: 1200,
+const PLATFORM_MAX_TOKENS: Record<Platform, number> = {
+  linkedin: 2400,
+  twitter: 1000,
+  facebook: 1600,
 }
 
 /**
  * POST /api/content/generate-posts
  *
- * Generates platform-specific written posts from a transcript + client DNA/prompt,
- * or from the client's DNA/prompt alone (prompt-only mode) when no transcript is provided.
+ * Transcript-grounded written-post generator. Each platform gets its own
+ * Claude call with a Rule Zero system prompt that forbids inventing facts
+ * outside the transcript. Returns streaming SSE with progress events and
+ * the extracted <draft> content per platform.
  *
- * Each platform gets its own Claude call for focused, higher-quality output.
- * If a client has a custom system prompt, uses that. Otherwise uses DNA-based fallback.
- * Returns streaming SSE with progress events and generated content.
+ * REQUIRES a transcript (transcript_id or submission_id). Returns 400 if
+ * neither is provided — no DNA-only fallback, per the non-hallucination
+ * commitment of the rebuild.
  */
 export async function POST(req: NextRequest) {
+  const supabase = getSupabase()
   const body: GeneratePostsRequest = await req.json()
-  const { client_id, transcript_id, submission_id, topic, platforms } = body
+  const { client_id, transcript_id, submission_id, platforms, include_few_shot = true } = body
 
   if (!client_id) {
     return Response.json({ error: 'client_id is required' }, { status: 400 })
@@ -49,16 +67,21 @@ export async function POST(req: NextRequest) {
   if (!platforms || platforms.length === 0) {
     return Response.json({ error: 'At least one platform is required' }, { status: 400 })
   }
+  if (!transcript_id && !submission_id) {
+    return Response.json(
+      { error: 'Transcript is required. Provide transcript_id or submission_id. This generator refuses to invent facts from DNA alone.' },
+      { status: 400 },
+    )
+  }
 
   const anthropicKey = process.env.CC_ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY
   if (!anthropicKey) {
     return Response.json({ error: 'ANTHROPIC_API_KEY not configured' }, { status: 500 })
   }
 
-  // Fetch transcript (if provided)
+  // Fetch the transcript.
   let transcriptText = ''
   let transcriptTitle = ''
-  const isPromptOnly = !transcript_id && !submission_id
 
   if (transcript_id) {
     const { data, error } = await supabase
@@ -71,7 +94,7 @@ export async function POST(req: NextRequest) {
       return Response.json({ error: 'Transcript not found' }, { status: 404 })
     }
     transcriptText = data.transcript_text
-    transcriptTitle = data.title
+    transcriptTitle = data.title || 'Untitled transcript'
   } else if (submission_id) {
     const { data, error } = await supabase
       .from('qc_submissions')
@@ -83,13 +106,17 @@ export async function POST(req: NextRequest) {
       return Response.json({ error: 'Submission transcript not found' }, { status: 404 })
     }
     transcriptText = data.transcript
-    transcriptTitle = data.title
-  } else {
-    // Prompt-only mode: no transcript needed
-    transcriptTitle = topic || 'DNA-based generation'
+    transcriptTitle = data.title || 'Untitled submission'
   }
 
-  // Fetch client DNA + custom prompt + client name in parallel
+  if (!transcriptText || transcriptText.trim().length < 50) {
+    return Response.json(
+      { error: 'Transcript is empty or too short to generate from. Minimum 50 characters.' },
+      { status: 400 },
+    )
+  }
+
+  // Fetch client DNA + master prompt + name in parallel.
   const [dnaResult, clientPromptResult, clientResult] = await Promise.all([
     supabase
       .from('client_dna')
@@ -116,12 +143,6 @@ export async function POST(req: NextRequest) {
   const dna = dnaResult.data
   const clientPrompt = clientPromptResult.data
   const clientName = clientResult.data?.name || `Client ${client_id}`
-  const hasCustomPrompt = !!clientPrompt?.system_prompt
-
-  // Prompt-only mode requires at least DNA or a custom prompt
-  if (isPromptOnly && !dna?.dna_markdown && !hasCustomPrompt) {
-    return Response.json({ error: 'No transcript, DNA, or prompt available for this client' }, { status: 400 })
-  }
 
   const encoder = new TextEncoder()
 
@@ -134,11 +155,11 @@ export async function POST(req: NextRequest) {
       try {
         const anthropic = new Anthropic({ apiKey: anthropicKey })
 
-        // Extract signal from transcript via Haiku (if transcript is long enough to benefit)
+        // Extract signal from transcript via Haiku (if it's long enough to benefit).
         let processedTranscript = transcriptText
         let wasExtracted = false
 
-        if (!isPromptOnly && transcriptText.length > 15000) {
+        if (transcriptText.length > 15000) {
           sendEvent('progress', {
             stage: 'extracting',
             message: `Extracting key insights from transcript via Haiku...`,
@@ -165,109 +186,104 @@ export async function POST(req: NextRequest) {
 
         sendEvent('progress', {
           stage: 'generating',
-          message: isPromptOnly
-            ? `Generating ${platforms.length} post(s) for ${clientName} from brand DNA${topic ? ` (topic: ${topic})` : ''}...`
-            : hasCustomPrompt
-              ? `Generating ${platforms.length} post(s) using ${clientName}'s custom brand prompt...`
-              : `Generating ${platforms.length} post(s) from transcript + DNA...`,
+          message: `Generating ${platforms.length} post(s) for ${clientName} from "${transcriptTitle}"...`,
         })
 
-        // Generate each platform separately for focused, higher-quality output
         const platformResults: Record<string, string> = {}
+        const platformTracebacks: Record<string, string | null> = {}
 
         for (const platform of platforms) {
           sendEvent('progress', {
             stage: 'generating',
-            message: `Writing ${platform} post${isPromptOnly ? ' (from DNA)' : ''}...`,
+            message: `Writing ${platform} post...`,
+            platform,
           })
 
-          // Build system prompt per-platform
+          // Load recent approved posts for this platform as STYLE-only few-shot.
+          const recentApprovedPosts = include_few_shot
+            ? await loadRecentApprovedExamples(supabase, client_id, platform, 3)
+            : []
+
+          // Build the prompts via the new Rule-Zero builder.
           let systemPrompt: string
-          const platformRules = CC_PLATFORM_DEFAULTS[platform as keyof typeof CC_PLATFORM_DEFAULTS] || ''
-
-          if (hasCustomPrompt) {
-            const taskDescription = isPromptOnly
-              ? `Generate a ${platform.toUpperCase()} post based on your brand expertise and knowledge.`
-              : `Generate a ${platform.toUpperCase()} post from the transcript below.`
-
-            systemPrompt = `${clientPrompt.system_prompt}
-
-## TASK: ${taskDescription}
-
-Apply ALL your brand rules, compliance checks, and voice guidelines.
-
-${platformRules}
-
-CRITICAL REMINDERS:
-- NEVER use em dashes (—). Use commas, periods, colons, or semicolons.
-- NEVER use specific numbers unless DIRECTLY quoted from the transcript or system prompt.
-- NEVER use hype phrases: "game-changer," "mind-blowing," "buckle up," "let that sink in," "here's the thing," "read that again," "this is huge."
-- NEVER use generic filler: "Let me know what you think!", "Drop a comment!", "Follow for more!"
-- Output the post ONLY. No commentary, no "here's the post," no meta-notes. Ready to copy-paste.`
-          } else {
-            systemPrompt = buildFallbackPrompt(clientName, dna?.dna_markdown || null, platform as 'linkedin' | 'twitter' | 'facebook')
-          }
-
-          // Build user prompt based on mode
           let userPrompt: string
-
-          if (isPromptOnly) {
-            userPrompt = `Write ONE original ${platform} post as ${clientName}.
-
-${topic ? `Topic/theme to focus on: ${topic}` : 'Pick the single most compelling topic from the content pillars, proof points, or unique mechanisms in your system prompt.'}
-
-Use the voice, stories, proof points, and content strategy from the system prompt. Go DEEP on one specific idea.
-
-CRITICAL:
-- Do NOT invent specific numbers, client names, or case study details not in the system prompt.
-- Use only facts, metrics, and examples that appear in the system prompt.
-- Write from first person as ${clientName} sharing expertise.
-- Output the post only. Ready to publish. No preamble.`
-          } else {
-            userPrompt = `Transcript from "${transcriptTitle}"${wasExtracted ? ' (key insights extracted via AI)' : ''}:
-
----
-${processedTranscript}
----
-
-Write ONE ${platform} post from this transcript. Pick the single most compelling, unique, or valuable idea and go DEEP on it.${
-  platforms.length > 1 ? `\n\nIMPORTANT: This post should cover a DIFFERENT angle than the other platform posts. Focus on what works best for ${platform}'s audience and format.` : ''
-}
-
-Output the post only. Ready to publish. No preamble.`
+          try {
+            systemPrompt = buildGenerationSystemPrompt({
+              clientName,
+              platform,
+              masterPrompt: clientPrompt?.system_prompt || null,
+              dnaDocText: null,                           // Phase 3 will populate
+              dnaMarkdown: dna?.dna_markdown || null,     // Phase 1 legacy fallback
+              knowledgeNotes: null,                       // Phase 4 will populate
+              recentApprovedPosts,
+              transcriptText: processedTranscript,
+              transcriptTitle,
+              wasExtracted,
+            })
+            userPrompt = buildGenerationUserPrompt({
+              clientName,
+              platform,
+              masterPrompt: clientPrompt?.system_prompt || null,
+              dnaDocText: null,
+              dnaMarkdown: dna?.dna_markdown || null,
+              knowledgeNotes: null,
+              recentApprovedPosts,
+              transcriptText: processedTranscript,
+              transcriptTitle,
+              wasExtracted,
+            })
+          } catch (err) {
+            if (err instanceof MissingTranscriptError || err instanceof MissingVoiceError) {
+              sendEvent('error', { message: err.message, platform })
+              continue
+            }
+            throw err
           }
 
-          let platformResponse = ''
-
+          // Stream the response for timeout safety; await the final message so
+          // we can parse <draft> / <traceback> cleanly. Prompt caching on the
+          // last system block keeps repeat per-client generations cheap.
           const messageStream = anthropic.messages.stream({
-            model: 'claude-sonnet-4-20250514',
-            max_tokens: PLATFORM_MAX_TOKENS[platform] || 1500,
-            system: systemPrompt,
+            model: POSTGEN_MODEL,
+            max_tokens: PLATFORM_MAX_TOKENS[platform],
+            system: [
+              {
+                type: 'text',
+                text: systemPrompt,
+                cache_control: { type: 'ephemeral' },
+              },
+            ],
             messages: [{ role: 'user', content: userPrompt }],
           })
 
-          for await (const event of messageStream) {
-            if (event.type === 'content_block_delta' && event.delta.type === 'text_delta') {
-              const text = event.delta.text
-              platformResponse += text
-              sendEvent('text', { content: text, platform })
-            }
+          const finalMessage = await messageStream.finalMessage()
+          const rawText = finalMessage.content
+            .filter(block => block.type === 'text')
+            .map(block => (block as { type: 'text'; text: string }).text)
+            .join('')
+
+          const { draft, traceback, matchedContract } = extractDraft(rawText)
+          if (!matchedContract) {
+            console.warn(
+              `[generate-posts] ${platform} response did not match <draft>/<traceback> contract for client ${client_id}. Falling back to raw output.`,
+            )
           }
 
-          // CC-wide post-processing: safety net for em dashes + hype phrases
-          platformResults[platform] = ccPostProcess(platformResponse)
+          const cleanedDraft = ccPostProcess(draft)
+          platformResults[platform] = cleanedDraft
+          platformTracebacks[platform] = traceback
 
-          // Add separator between platforms in the stream
+          // Emit the final draft as a single text event. Frontend accumulates text events.
+          sendEvent('text', { content: cleanedDraft, platform })
+
           if (platforms.indexOf(platform) < platforms.length - 1) {
-            const separator = '\n\n---\n\n'
-            sendEvent('text', { content: separator })
+            sendEvent('text', { content: '\n\n---\n\n' })
           }
         }
 
-        // Combine all platform results for the final done event
         const fullResponse = platforms.map(p => {
           const header = p === 'linkedin' ? '## LinkedIn Post' : p === 'twitter' ? '## X (Twitter) Post' : '## Facebook Post'
-          return `${header}\n\n${platformResults[p]}`
+          return `${header}\n\n${platformResults[p] || ''}`
         }).join('\n\n---\n\n')
 
         sendEvent('done', {
@@ -275,9 +291,12 @@ Output the post only. Ready to publish. No preamble.`
           client_name: clientName,
           transcript_title: transcriptTitle,
           platforms,
-          used_custom_prompt: hasCustomPrompt,
-          prompt_only: isPromptOnly,
+          used_custom_prompt: !!clientPrompt?.system_prompt,
           platform_results: platformResults,
+          // Tracebacks are emitted for logs/debugging but stripped from the
+          // saved content. Surfaced in done event so the UI can optionally
+          // display them (Phase 1: hidden from PM view).
+          platform_tracebacks: platformTracebacks,
         })
 
         controller.close()

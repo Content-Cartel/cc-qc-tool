@@ -1,10 +1,14 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-)
+export const dynamic = 'force-dynamic'
+
+function getSupabase() {
+  return createClient(
+    (process.env.NEXT_PUBLIC_SUPABASE_URL_1 || process.env.NEXT_PUBLIC_SUPABASE_URL)!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY_1 || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY_1 || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
+}
 
 interface DeepgramWord {
   word: string
@@ -75,6 +79,7 @@ function validateDeepgramWords(words: DeepgramWord[]): { score: number; issues: 
  * }
  */
 export async function POST(req: NextRequest) {
+  const supabase = getSupabase()
   try {
     // Validate webhook secret
     const secret = req.headers.get('x-webhook-secret')
@@ -96,7 +101,7 @@ export async function POST(req: NextRequest) {
     // Get current submission
     const { data: submission, error: fetchErr } = await supabase
       .from('qc_submissions')
-      .select('id, metadata, client_id, title')
+      .select('id, metadata, client_id, title, created_at')
       .eq('id', submission_id)
       .single()
 
@@ -154,6 +159,40 @@ export async function POST(req: NextRequest) {
         },
       })
       .eq('id', submission_id)
+
+    // Bridge to client_transcripts so the written-post pipeline (Friday cron,
+    // Slack trigger, review UI's client library) can see Drive/Deepgram
+    // transcripts alongside YouTube. Best-effort: failures here are logged
+    // but do not block the webhook response to the Railway worker.
+    if (
+      transcriptStatus === 'completed' &&
+      typeof transcript === 'string' &&
+      transcript.length > 200 &&
+      submission.client_id
+    ) {
+      const wordCount = transcript.split(/\s+/).length
+      const { error: bridgeErr } = await supabase
+        .from('client_transcripts')
+        .upsert({
+          client_id: submission.client_id,
+          source: 'drive_deepgram',
+          source_id: submission_id,
+          submission_id,
+          title: submission.title || null,
+          transcript_text: transcript,
+          word_count: wordCount,
+          recorded_at: submission.created_at,
+          metadata: {
+            transcription_health_score: healthScore,
+            bridged_from: 'webhook/transcription-complete',
+          },
+          relevance_tag: 'general',
+        }, { onConflict: 'client_id,source,source_id' })
+
+      if (bridgeErr) {
+        console.error('[transcription-complete] Bridge to client_transcripts failed:', bridgeErr.message)
+      }
+    }
 
     // Auto-trigger spelling check if health is good
     if (transcriptStatus === 'completed' && healthScore >= 90) {

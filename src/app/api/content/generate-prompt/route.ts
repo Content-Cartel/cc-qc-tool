@@ -8,11 +8,14 @@ import { extractMultipleTranscripts } from '@/lib/content/transcript-extractor'
 import { syncFathomMeetings, isFathomConfigured } from '@/lib/dna/fathom'
 
 export const maxDuration = 300
+export const dynamic = 'force-dynamic'
 
-const supabase = createClient(
-  process.env.NEXT_PUBLIC_SUPABASE_URL!,
-  process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
-)
+function getSupabase() {
+  return createClient(
+    (process.env.NEXT_PUBLIC_SUPABASE_URL_1 || process.env.NEXT_PUBLIC_SUPABASE_URL)!,
+    process.env.SUPABASE_SERVICE_ROLE_KEY_1 || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SERVICE_KEY || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY_1 || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!
+  )
+}
 
 /**
  * POST /api/content/generate-prompt
@@ -29,6 +32,7 @@ const supabase = createClient(
  * ALL heavy work happens INSIDE the stream so the client gets immediate feedback.
  */
 export async function POST(req: NextRequest) {
+  const supabase = getSupabase()
   const { client_id } = await req.json()
 
   if (!client_id) {

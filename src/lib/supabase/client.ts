@@ -6,8 +6,8 @@ const FALLBACK_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZ
 export function createClient() {
   // Use fallback values during build/SSR pre-rendering when env vars may not be available.
   // The actual client-side code will always have the real values from NEXT_PUBLIC_ env vars.
-  const url = process.env.NEXT_PUBLIC_SUPABASE_URL || FALLBACK_URL
-  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || FALLBACK_KEY
+  const url = process.env.NEXT_PUBLIC_SUPABASE_URL_1 || process.env.NEXT_PUBLIC_SUPABASE_URL || FALLBACK_URL
+  const key = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY_1 || process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY || FALLBACK_KEY
 
   return createBrowserClient(url, key)
 }

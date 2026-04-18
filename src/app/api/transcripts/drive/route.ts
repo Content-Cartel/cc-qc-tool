@@ -11,14 +11,16 @@ function getSupabase() {
 }
 
 /**
- * POST /api/transcripts/youtube
- * Ingest a single YouTube video transcript (for Vedant's scraper).
+ * POST /api/transcripts/drive
+ * Ingest a single Drive/Deepgram transcript (for the cc-written-agent cron).
  *
- * POST /api/transcripts/youtube?batch=true
+ * POST /api/transcripts/drive?batch=true
  * Ingest multiple transcripts at once.
+ *
+ * Dedup key: (client_id, source='drive_deepgram', source_id).
+ * source_id = submission_id ?? drive_file_id. At least one is required.
  */
 export async function POST(req: NextRequest) {
-  // Auth check
   const apiKey = req.headers.get('x-api-key')
   const expectedKey = process.env.TRANSCRIPT_API_KEY
   if (expectedKey && apiKey !== expectedKey) {
@@ -34,23 +36,30 @@ export async function POST(req: NextRequest) {
   return handleSingle(body)
 }
 
-interface TranscriptPayload {
+interface DrivePayload {
   client_id: number
-  video_id: string
+  submission_id?: string
+  drive_file_id?: string
   title?: string
   transcript_text: string
   duration_seconds?: number
   recorded_at?: string
   metadata?: Record<string, unknown>
+  relevance_tag?: 'general' | 'onboarding' | 'strategy' | 'content_review'
 }
 
-async function handleSingle(payload: TranscriptPayload) {
-  const supabase = getSupabase()
-  const { client_id, video_id, transcript_text, title, duration_seconds, recorded_at, metadata } = payload
+function resolveSourceId(p: DrivePayload): string | null {
+  return p.submission_id || p.drive_file_id || null
+}
 
-  if (!client_id || !video_id || !transcript_text) {
+async function handleSingle(payload: DrivePayload) {
+  const supabase = getSupabase()
+  const { client_id, transcript_text, title, duration_seconds, recorded_at, metadata, relevance_tag, submission_id } = payload
+  const source_id = resolveSourceId(payload)
+
+  if (!client_id || !transcript_text || !source_id) {
     return Response.json(
-      { error: 'client_id, video_id, and transcript_text are required' },
+      { error: 'client_id, transcript_text, and one of (submission_id, drive_file_id) are required' },
       { status: 400 }
     )
   }
@@ -59,17 +68,16 @@ async function handleSingle(payload: TranscriptPayload) {
 
   const { data, error } = await supabase.from('client_transcripts').upsert({
     client_id,
-    source: 'youtube',
-    source_id: video_id,
+    source: 'drive_deepgram',
+    source_id,
+    submission_id: submission_id || null,
     title: title || null,
     transcript_text,
-    summary: null,
-    speaker_names: null,
     word_count: wordCount,
     duration_seconds: duration_seconds || null,
     recorded_at: recorded_at || null,
     metadata: metadata || {},
-    relevance_tag: 'general',
+    relevance_tag: relevance_tag || 'general',
   }, {
     onConflict: 'client_id,source,source_id',
   }).select('id').single()
@@ -81,17 +89,18 @@ async function handleSingle(payload: TranscriptPayload) {
   return Response.json({ success: true, id: data?.id, word_count: wordCount })
 }
 
-async function handleBatch(items: TranscriptPayload[]) {
+async function handleBatch(items: DrivePayload[]) {
   if (!items.length) {
     return Response.json({ error: 'Empty batch' }, { status: 400 })
   }
 
   const supabase = getSupabase()
-  const results: { video_id: string; success: boolean; error?: string; word_count?: number }[] = []
+  const results: { source_id: string; success: boolean; error?: string; word_count?: number }[] = []
 
   for (const item of items) {
-    if (!item.client_id || !item.video_id || !item.transcript_text) {
-      results.push({ video_id: item.video_id || 'unknown', success: false, error: 'Missing required fields' })
+    const source_id = resolveSourceId(item)
+    if (!item.client_id || !item.transcript_text || !source_id) {
+      results.push({ source_id: source_id || 'unknown', success: false, error: 'Missing required fields' })
       continue
     }
 
@@ -99,23 +108,22 @@ async function handleBatch(items: TranscriptPayload[]) {
 
     const { error } = await supabase.from('client_transcripts').upsert({
       client_id: item.client_id,
-      source: 'youtube',
-      source_id: item.video_id,
+      source: 'drive_deepgram',
+      source_id,
+      submission_id: item.submission_id || null,
       title: item.title || null,
       transcript_text: item.transcript_text,
-      summary: null,
-      speaker_names: null,
       word_count: wordCount,
       duration_seconds: item.duration_seconds || null,
       recorded_at: item.recorded_at || null,
       metadata: item.metadata || {},
-      relevance_tag: 'general',
+      relevance_tag: item.relevance_tag || 'general',
     }, {
       onConflict: 'client_id,source,source_id',
     })
 
     results.push({
-      video_id: item.video_id,
+      source_id,
       success: !error,
       error: error?.message,
       word_count: error ? undefined : wordCount,
