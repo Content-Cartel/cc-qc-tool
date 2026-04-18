@@ -110,12 +110,6 @@ const PLATFORM_TAB_TITLE: Record<PlatformKey, string> = {
   twitter: 'X (Twitter)',
   facebook: 'Facebook',
 }
-const PLATFORM_TAB_EMOJI: Record<PlatformKey, string> = {
-  linkedin: '💼',
-  twitter: '🐦',
-  facebook: '📘',
-}
-const WEEK_TAB_EMOJI = '🗓️'
 
 /**
  * Compute the "Week of Mon-Sun, YYYY" label for the current moment.
@@ -170,7 +164,6 @@ async function createChildTab(
   documentId: string,
   parentTabId: string,
   childTitle: string,
-  iconEmoji: string,
 ): Promise<string | null> {
   const addRes = await docsApi.documents.batchUpdate({
     documentId,
@@ -181,7 +174,6 @@ async function createChildTab(
             tabProperties: {
               title: childTitle,
               parentTabId,
-              iconEmoji,
             },
           },
         },
@@ -198,11 +190,11 @@ async function createChildTab(
  *
  * Structure per doc after this call:
  *   📄 [Client] - CC Written Content
- *      🗓️ Week of April 13-19, 2026      ← parent tab (one per week)
- *         💼 LinkedIn                   ← child tab per platform
- *         🐦 X (Twitter)
- *         📘 Facebook
- *      🗓️ Week of April 6-12, 2026
+ *      Week of April 13-19, 2026       ← parent tab (one per week)
+ *         LinkedIn                    ← child tab per platform
+ *         X (Twitter)
+ *         Facebook
+ *      Week of April 6-12, 2026
  *         ...
  *
  * Idempotent: a second call in the same week reuses the parent week tab and
@@ -280,7 +272,6 @@ export async function appendPostsToDoc(
               addDocumentTab: {
                 tabProperties: {
                   title: weekLabel,
-                  iconEmoji: WEEK_TAB_EMOJI,
                 },
               },
             },
@@ -308,7 +299,6 @@ export async function appendPostsToDoc(
           docInfo.docId,
           weekTabId,
           childTitle,
-          PLATFORM_TAB_EMOJI[platform],
         )
       }
       if (!childTabId) {

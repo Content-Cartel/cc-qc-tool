@@ -48,8 +48,12 @@ interface ClientResult {
 }
 
 /**
- * Build a plan of 5 transcript-grounded posts for a client.
- * Platform mix: 2 LinkedIn, 2 X/Twitter, 1 Facebook.
+ * Build a plan of 14 transcript-grounded posts for a client.
+ * Platform mix: 5 LinkedIn, 4 X/Twitter, 5 Facebook.
+ *
+ * Transcripts are round-robined across the 14 slots so variety is preserved
+ * regardless of how many transcripts exist (1 → all 14 from the same, 2 →
+ * alternating, 3+ → evenly spread).
  *
  * If no transcripts are available, returns an empty array. The caller skips
  * the client — no DNA-only generation. This is the non-negotiable Rule Zero
@@ -60,38 +64,31 @@ function buildPostPlan(
 ): PostPlan[] {
   if (transcripts.length === 0) return []
 
-  const platforms: Platform[] = ['linkedin', 'twitter', 'linkedin', 'twitter', 'facebook']
-  const posts: PostPlan[] = []
+  const platformOrder: Platform[] = [
+    'linkedin', 'linkedin', 'linkedin', 'linkedin', 'linkedin',
+    'twitter', 'twitter', 'twitter', 'twitter',
+    'facebook', 'facebook', 'facebook', 'facebook', 'facebook',
+  ]
 
-  // Distribute 5 posts across available transcripts.
-  // 3+ transcripts: 2/2/1.  2 transcripts: 3/2.  1 transcript: 5-from-one.
-  let assignments: number[]
-  if (transcripts.length >= 3) {
-    assignments = [0, 1, 0, 1, 2]
-  } else if (transcripts.length === 2) {
-    assignments = [0, 1, 0, 1, 0]
-  } else {
-    assignments = [0, 0, 0, 0, 0]
-  }
-
-  for (let i = 0; i < 5; i++) {
-    const t = transcripts[assignments[i]]
-    posts.push({ platform: platforms[i], transcript_id: t.id, transcript_title: t.title })
-  }
-  return posts
+  return platformOrder.map((platform, i) => {
+    const t = transcripts[i % transcripts.length]
+    return { platform, transcript_id: t.id, transcript_title: t.title }
+  })
 }
 
 /**
  * GET /api/cron/generate-weekly-posts
  *
  * Vercel Cron job that runs every Friday 14:00 UTC.
- * Generates 5 transcript-grounded posts per eligible client (2 LinkedIn, 2 X/Twitter, 1 Facebook).
+ * Generates 14 transcript-grounded posts per eligible client
+ * (5 LinkedIn, 4 X/Twitter, 5 Facebook).
  *
  * Clients without eligible transcripts are SKIPPED. No DNA-only generation —
  * the generator refuses to invent facts from DNA alone. This is Rule Zero:
  * transcripts are the only source of factual content.
  *
- * Saves to generated_content, appends to Google Doc, notifies Slack.
+ * Saves to generated_content, appends to Google Doc (Week → Platform tab
+ * hierarchy), notifies Slack.
  */
 export async function GET(req: NextRequest) {
   const supabase = getSupabase()
@@ -329,8 +326,10 @@ export async function GET(req: NextRequest) {
         status: 'draft',
       }).select('id').single()
 
-      // Save individual posts as content examples for Slack AI training
-      // Clean out old AI-generated examples (keep latest 15 per client)
+      // Save individual posts as content examples for Slack AI training.
+      // Keep the latest ~50 AI-generated examples per client so there's a few
+      // weeks of variety in the pool without growing unbounded.
+      const KEEP_EXAMPLES = 50
       const { data: oldExamples } = await supabase
         .from('client_content_examples')
         .select('id')
@@ -338,8 +337,8 @@ export async function GET(req: NextRequest) {
         .eq('content_type', 'ai_generated')
         .order('published_at', { ascending: false })
 
-      if (oldExamples && oldExamples.length >= 15) {
-        const idsToDelete = oldExamples.slice(10).map(e => e.id) // keep 10, delete rest to make room for 5 new
+      if (oldExamples && oldExamples.length > KEEP_EXAMPLES) {
+        const idsToDelete = oldExamples.slice(KEEP_EXAMPLES).map(e => e.id)
         if (idsToDelete.length > 0) {
           await supabase.from('client_content_examples').delete().in('id', idsToDelete)
         }

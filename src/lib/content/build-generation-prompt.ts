@@ -83,11 +83,17 @@ function buildRuleZero(clientName: string, platform: Platform): string {
 
 Every factual claim in your output — every number, dollar amount, statistic, name, date, quote, anecdote, case study, client story, or example — MUST come from the TRANSCRIPT section in the user message. Nothing else is a valid source of facts.
 
-- The VOICE and BRAND sections tell you HOW to write.
-- The TRANSCRIPT tells you WHAT to write about.
-- Never cross these streams.
+If the transcript doesn't support a claim, don't make it. Paraphrase the speaker loosely instead. When in doubt, leave it out.
 
-If the transcript doesn't support a claim, don't make it. Paraphrase the speaker loosely instead. When in doubt, leave it out.`
+═══ RULE ONE — VOICE MIRRORS THE TRANSCRIPT ═══
+
+The transcript is also the source of TONE. The post should sound the way the speaker actually sounded on that video — their cadence, their register, their vocabulary, their pacing. If they're casual and loose, write casual and loose. If they're formal and authoritative, write formal and authoritative. If they use specific phrasings, metaphors, or catchphrases, echo them in this post. Match their energy and rhythm.
+
+The master prompt defines voice FLOOR: compliance rules, red lines, formatting standards that always apply. The transcript defines voice FEEL for this particular post. When they disagree on tone, the transcript wins — within the master prompt's red lines.
+
+- The VOICE and BRAND sections tell you the general rules for HOW to write.
+- The TRANSCRIPT tells you WHAT to write about AND how this particular piece should sound.
+- Never cross the facts stream.`
 }
 
 function buildVoiceSpine(i: GenerationInputs): string {
