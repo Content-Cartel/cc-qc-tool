@@ -194,28 +194,43 @@ The caller will strip <traceback> before saving. It exists so humans can audit t
 
 function buildComplianceRules(rules: string | null): string | null {
   if (!rules || !rules.trim()) return null
-  return `═══ RULE TWO — CLIENT COMPLIANCE (NON-NEGOTIABLE) ═══
+  return `═══ RULE TWO — CLIENT COMPLIANCE (ABSOLUTE OVERRIDE) ═══
 
-The following rules are hard-line client-specific compliance rules. They override stylistic choices. If any rule is unclear, ERR ON THE SIDE OF THE RULE, not the style.
+These are hard-line client-specific compliance rules. They OVERRIDE all other instructions on FRAMING, WORDING, and LANGUAGE CHOICE, including Rule Zero (facts) and Rule One (tone).
+
+Important: Rule Zero still holds for FACTS — you can't invent what wasn't in the transcript. But if the transcript uses language or framing these rules ban, you REFRAME using compliant language. You cite the same fact; you don't replicate the speaker's banned phrasing or banned frame.
+
+Example: the transcript says "Article 1 Section 10 mandates..." and a rule here says "avoid constitutional originalism framing." You do NOT build the post around "Article 1 Section 10." You can acknowledge the legal basis in passing if needed, but the POST's framing is the economic one the rule specifies.
+
+THE RULES:
 
 ${rules.trim()}
 
-Before emitting <draft>, silently re-read the draft against every rule above. If the draft violates ANY rule, rewrite it until clean. Only emit when the draft satisfies every rule.`
+Before emitting <draft>, silently re-read your draft against EVERY rule above, word by word. If ANY rule is violated — banned phrase appears, required header missing, banned frame used — rewrite the draft until clean. Only emit when every rule is satisfied. If reframing is impossible without hallucinating, drop the offending section rather than violate a rule.`
 }
 
 function buildSelfCheck(): string {
   return `═══ FINAL SELF-CHECK (SILENT — DO NOT OUTPUT) ═══
 
-Before emitting <draft>, run this checklist on your draft in your head:
-1. Every factual claim traces to the transcript? (Rule Zero)
-2. Tone matches the transcript's tone? (Rule One)
-3. Every client-compliance rule satisfied? (Rule Two, if present)
-4. Post angle is distinct (doesn't repeat hooks from other posts in this batch)?
-5. CTA ties to the specific pain/opportunity THIS post raises, not a canned generic?
-6. No em-dashes, no hype phrases, no generic filler, no invented specifics?
-7. Length fits the platform?
+Before emitting <draft>, do a word-by-word re-read checking for these SPECIFIC failure modes, in order:
 
-If any answer is NO, rewrite before emitting. The <traceback> block comes AFTER the <draft> but the silent self-check happens BEFORE you commit to the draft.`
+1. SCAN FOR BANNED PHRASES. Rule Two lists client-specific banned phrases. Search your draft for EACH banned phrase literally, character by character. If any appear, rewrite.
+
+2. SCAN FOR BANNED FRAMES. Even without the exact banned phrase, check if your POST'S FRAMING matches a banned frame. Example: if Rule Two bans "constitutional originalism framing" and your hook is "Article 1 Section 10 mandates...", that's the banned frame even without the exact phrase. REFRAME.
+
+3. SCAN FOR REQUIRED HEADERS. Rule Two may require specific inline headers (e.g., [LEGAL REVIEW REQUIRED] before any yield claim). If a sentence triggers the rule, confirm the header is present VERBATIM on its own line immediately before.
+
+4. CHECK THE CTA. Does it tie to THIS post's specific pain or opportunity? Or is it a canned "schedule a call" that could ride the back of any post? If generic, rewrite.
+
+5. CHECK FOR DUPLICATE HOOK. Your <angle_focus> told you the angle for THIS post — a different angle than the other posts in this batch. If your draft's hook sounds like a generic take on the topic rather than THIS specific angle, rewrite.
+
+6. CHECK TONE. Does it sound like the speaker actually sounded on the transcript? Or does it sound generic-AI?
+
+7. CHECK FACTS. Every number, name, quote, claim traces to the transcript?
+
+8. CHECK BASIC RULES. No em-dashes, no hype phrases ("game-changer", "mind-blowing", "buckle up", etc.), no generic filler, no invented numbers, no "fatal flaw / elegantly simple / perfectly / only one that works" superlatives.
+
+If ANY check fails, rewrite and re-check the whole list. Only emit <draft> once the draft passes every check. Then emit <traceback>.`
 }
 
 /**

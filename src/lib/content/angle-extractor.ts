@@ -22,19 +22,35 @@ export interface Angle {
   hook: string | null
 }
 
-function buildAnglePrompt(count: number): string {
+function buildAnglePrompt(count: number, complianceRules: string | null): string {
+  const complianceBlock = complianceRules && complianceRules.trim()
+    ? `
+
+═══ CLIENT COMPLIANCE RULES (ABSOLUTE) ═══
+
+The angles you propose will seed ${count} social media posts that must obey these client-specific rules. DO NOT propose angles that would require the downstream post to violate a rule. If the transcript leans heavily on a banned frame (e.g., "constitutional originalism" or "war on savers" when banned), REFRAME the angle around a compliant alternative the rule specifies — don't just copy the speaker's banned frame.
+
+THE RULES:
+
+${complianceRules.trim()}
+
+End of client rules. Every angle you propose below must be compatible with them.
+
+═══════════════════════════════════════`
+    : ''
+
   return `You are an angle miner for Content Cartel's transcript-grounded post generator.
 
 Given a transcript, extract ${count} DISTINCT post angles. Each angle is one specific takeaway or insight that could form the basis of one social media post.
 
-The ${count} angles MUST be meaningfully different from each other — different topics, different framings, different hooks. Together they should cover the full range of the transcript, not overlap. Duplicates will cause downstream posts to converge, which is the exact problem this extraction is solving.
+The ${count} angles MUST be meaningfully different from each other — different topics, different framings, different hooks. Together they should cover the full range of the transcript, not overlap. Duplicates will cause downstream posts to converge, which is the exact problem this extraction is solving.${complianceBlock}
 
 For each angle, emit exactly this shape (nothing else):
 
 <angle>
-TAKEAWAY: [one sentence — the specific insight, phrased concretely]
+TAKEAWAY: [one sentence — the specific insight, phrased concretely${complianceRules ? ', compliant with the rules above' : ''}]
 ANCHOR: "[exact quote from the transcript that supports this angle, verbatim]"
-HOOK: [one short phrase suggesting an opening framing — not the full hook]
+HOOK: [one short phrase suggesting an opening framing${complianceRules ? ' — must be compliant with the rules above' : ''} — not the full hook]
 </angle>
 
 RULES:
@@ -43,7 +59,7 @@ RULES:
 - Each ANCHOR must be a verbatim phrase or sentence from the transcript. If no clear anchor exists, use the closest paraphrase with "[PARA]" prepended.
 - Each HOOK suggestion should be a specific opening idea, not a category. "A counter-intuitive take on carrying costs" is a hook. "Financial content" is not.
 - Angles can share topical DNA but must differ on framing, implication, or audience. (Same topic, different angle is fine. Same angle twice is the failure mode.)
-- If the transcript genuinely does not support ${count} distinct angles, prioritize distinctness over quantity — duplicates are worse than fewer angles.
+- If the transcript genuinely does not support ${count} distinct angles, prioritize distinctness over quantity — duplicates are worse than fewer angles.${complianceRules ? '\n- If multiple angles would all lean on a banned frame, REPLACE some with angles using compliant frames (even if less dominant in the transcript).' : ''}
 
 Emit only the <angle> blocks. No preamble. No commentary. Nothing else.`
 }
@@ -85,6 +101,7 @@ export async function extractDistinctAngles(
   transcriptTitle: string,
   count: number,
   apiKey: string,
+  complianceRules: string | null = null,
 ): Promise<Angle[]> {
   if (!transcriptText || transcriptText.trim().length < 100 || count < 1) {
     return []
@@ -96,7 +113,7 @@ export async function extractDistinctAngles(
       model: 'claude-haiku-4-5-20251001',
       // Rough budget: 14 angles × ~120 tokens each + overhead = 2k-ish; set 3k for safety.
       max_tokens: 3000,
-      system: buildAnglePrompt(count),
+      system: buildAnglePrompt(count, complianceRules),
       messages: [
         {
           role: 'user',

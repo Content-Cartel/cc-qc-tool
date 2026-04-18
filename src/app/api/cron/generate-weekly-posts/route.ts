@@ -258,6 +258,7 @@ export async function GET(req: NextRequest) {
             t?.title || 'Untitled',
             n,
             anthropicKey!,
+            complianceRules,
           )
           anglesByTranscript.set(tid, angles)
         }),
