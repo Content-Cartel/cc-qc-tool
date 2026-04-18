@@ -102,15 +102,130 @@ async function findWrittenContentDoc(
   }
 }
 
+type PlatformKey = 'linkedin' | 'twitter' | 'facebook'
+
+const PLATFORM_TAB_ORDER: PlatformKey[] = ['linkedin', 'twitter', 'facebook']
+const PLATFORM_TAB_TITLE: Record<PlatformKey, string> = {
+  linkedin: 'LinkedIn',
+  twitter: 'X (Twitter)',
+  facebook: 'Facebook',
+}
+const PLATFORM_TAB_EMOJI: Record<PlatformKey, string> = {
+  linkedin: '💼',
+  twitter: '🐦',
+  facebook: '📘',
+}
+const WEEK_TAB_EMOJI = '🗓️'
+
 /**
- * Appends generated posts to a client's "AI Written Posts" doc.
- * Creates the doc if it doesn't exist.
- * Returns the doc URL.
+ * Compute the "Week of Mon-Sun, YYYY" label for the current moment.
+ * Used as the parent tab title; identical format lets us reuse a tab if
+ * the cron runs more than once in the same week (idempotent re-runs).
+ */
+function buildWeekLabel(now: Date = new Date()): string {
+  const dayOfWeek = now.getDay() // 0=Sun, 1=Mon, ...
+  const daysToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek
+  const monday = new Date(now)
+  monday.setDate(now.getDate() + daysToMonday)
+  const sunday = new Date(monday)
+  sunday.setDate(monday.getDate() + 6)
+  const formatDate = (d: Date) =>
+    d.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })
+  return `Week of ${formatDate(monday)}-${formatDate(sunday)}, ${monday.getFullYear()}`
+}
+
+/**
+ * Recursive walker: given a tree of tabs, find one matching the predicate.
+ * Google Docs tabs can be nested arbitrarily deep but we only use one level
+ * of nesting (week → platform). Walker handles any depth for safety.
+ */
+function findTab(
+  tabs: docs_v1.Schema$Tab[] | undefined,
+  predicate: (t: docs_v1.Schema$Tab) => boolean,
+): docs_v1.Schema$Tab | null {
+  if (!tabs) return null
+  for (const t of tabs) {
+    if (predicate(t)) return t
+    const child = findTab(t.childTabs, predicate)
+    if (child) return child
+  }
+  return null
+}
+
+/**
+ * Find the tabId of an empty new tab's body insertion point. A fresh tab's
+ * body starts at index 1 (the implicit leading paragraph), so we return 1.
+ * If the tab already has content we still insert at 1 to prepend — but since
+ * we only write to freshly-created platform tabs, 1 is always the start.
+ */
+const NEW_TAB_INSERT_INDEX = 1
+
+/**
+ * Get a child tab (by title) under a given parent tabId, or create it.
+ * Returns the tabId of the resolved tab.
+ */
+async function ensureChildTab(
+  docsApi: docs_v1.Docs,
+  documentId: string,
+  parentTabId: string,
+  childTitle: string,
+  iconEmoji: string,
+  order: number,
+): Promise<string | null> {
+  const refresh = await docsApi.documents.get({
+    documentId,
+    includeTabsContent: true,
+  })
+  const parentTab = findTab(refresh.data.tabs, t => t.tabProperties?.tabId === parentTabId)
+  const existing = parentTab?.childTabs?.find(
+    t => t.tabProperties?.title === childTitle,
+  )
+  if (existing?.tabProperties?.tabId) return existing.tabProperties.tabId
+
+  const addRes = await docsApi.documents.batchUpdate({
+    documentId,
+    requestBody: {
+      requests: [
+        {
+          addDocumentTab: {
+            tabProperties: {
+              title: childTitle,
+              parentTabId,
+              index: order,
+              iconEmoji,
+            },
+          },
+        },
+      ],
+    },
+  })
+  const newId = addRes.data.replies?.[0]?.addDocumentTab?.tabProperties?.tabId
+  return newId || null
+}
+
+/**
+ * Append a week's generated posts into a client's "CC Written Content" doc
+ * using Google Docs tabs (Week → Platform hierarchy).
+ *
+ * Structure per doc after this call:
+ *   📄 [Client] - CC Written Content
+ *      🗓️ Week of April 13-19, 2026      ← parent tab (one per week)
+ *         💼 LinkedIn                   ← child tab per platform
+ *         🐦 X (Twitter)
+ *         📘 Facebook
+ *      🗓️ Week of April 6-12, 2026
+ *         ...
+ *
+ * Idempotent: a second call in the same week reuses the parent week tab and
+ * appends to any existing platform tabs.
+ *
+ * Legacy behaviour: pre-tabs content (the old linear page-break format) stays
+ * untouched in the default tab. New weekly batches land as siblings.
  */
 export async function appendPostsToDoc(
   clientName: string,
-  content: string,
-  folderId: string | null
+  postsByPlatform: Record<PlatformKey, string[]>,
+  folderId: string | null,
 ): Promise<{ url: string; docId: string } | null> {
   if (!folderId) return null
 
@@ -120,9 +235,9 @@ export async function appendPostsToDoc(
   const docsApi = google.docs({ version: 'v1', auth })
 
   try {
+    // 1. Locate (or create) the doc.
     let docInfo = await findWrittenContentDoc(folderId)
     if (!docInfo) {
-      // Auto-create the doc if it doesn't exist
       const drive = google.drive({ version: 'v3', auth })
       const file = await drive.files.create({
         requestBody: {
@@ -144,52 +259,89 @@ export async function appendPostsToDoc(
       console.log(`[google-docs] Created Written Content doc for ${clientName}: ${docInfo.url}`)
     }
 
-    // Get current doc length to append at the end
-    const doc = await docsApi.documents.get({ documentId: docInfo.docId })
-    const endIndex = doc.data.body?.content?.slice(-1)?.[0]?.endIndex || 1
+    const weekLabel = buildWeekLabel()
 
-    // Calculate the Monday-Sunday week range
-    const now = new Date()
-    const dayOfWeek = now.getDay() // 0=Sun, 1=Mon, ...
-    const daysToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek
-    const monday = new Date(now)
-    monday.setDate(now.getDate() + daysToMonday)
-    const sunday = new Date(monday)
-    sunday.setDate(monday.getDate() + 6)
-
-    const formatDate = (d: Date) => d.toLocaleDateString('en-US', { month: 'long', day: 'numeric' })
-    const weekLabel = `Week of ${formatDate(monday)}-${formatDate(sunday)}, ${monday.getFullYear()}`
-
-    const header = `${weekLabel}\n${'='.repeat(60)}\n\n`
-    const fullText = header + content + '\n\n'
-    const insertIndex = Math.max(endIndex - 1, 1)
-
-    await docsApi.documents.batchUpdate({
+    // 2. Find or create the week parent tab.
+    const initial = await docsApi.documents.get({
       documentId: docInfo.docId,
-      requestBody: {
-        requests: [
-          // Page break first so each generation starts on a fresh page
-          {
-            insertText: {
-              location: { index: insertIndex },
-              text: '\n',
-            },
-          },
-          {
-            insertPageBreak: {
-              location: { index: insertIndex },
-            },
-          },
-          // Then insert the content after the page break
-          {
-            insertText: {
-              location: { index: insertIndex + 2 }, // after page break + newline
-              text: fullText,
-            },
-          },
-        ],
-      },
+      includeTabsContent: true,
     })
+    let weekTabId: string | null =
+      findTab(initial.data.tabs, t => t.tabProperties?.title === weekLabel)
+        ?.tabProperties?.tabId || null
+
+    if (!weekTabId) {
+      // Create at the top of the list so the newest week is first.
+      const createRes = await docsApi.documents.batchUpdate({
+        documentId: docInfo.docId,
+        requestBody: {
+          requests: [
+            {
+              addDocumentTab: {
+                tabProperties: {
+                  title: weekLabel,
+                  index: 0,
+                  iconEmoji: WEEK_TAB_EMOJI,
+                },
+              },
+            },
+          ],
+        },
+      })
+      weekTabId =
+        createRes.data.replies?.[0]?.addDocumentTab?.tabProperties?.tabId || null
+      if (!weekTabId) {
+        console.error(`[google-docs] Failed to create week tab for ${clientName}`)
+        return { url: docInfo.url, docId: docInfo.docId }
+      }
+    }
+
+    // 3. For each platform, ensure a child tab exists, then write posts.
+    for (let i = 0; i < PLATFORM_TAB_ORDER.length; i++) {
+      const platform = PLATFORM_TAB_ORDER[i]
+      const posts = postsByPlatform[platform] || []
+      if (posts.length === 0) continue
+
+      const childTabId = await ensureChildTab(
+        docsApi,
+        docInfo.docId,
+        weekTabId,
+        PLATFORM_TAB_TITLE[platform],
+        PLATFORM_TAB_EMOJI[platform],
+        i,
+      )
+      if (!childTabId) {
+        console.error(
+          `[google-docs] Failed to create ${platform} tab under ${weekLabel} for ${clientName}`,
+        )
+        continue
+      }
+
+      // Build the content: headed, numbered, separated. One pass for clarity;
+      // the model output is already cleaned by ccPostProcess.
+      const body = posts
+        .map((p, idx) =>
+          posts.length > 1
+            ? `## ${PLATFORM_TAB_TITLE[platform]} — Post ${idx + 1}\n\n${p}\n`
+            : `## ${PLATFORM_TAB_TITLE[platform]}\n\n${p}\n`,
+        )
+        .join('\n---\n\n')
+
+      await docsApi.documents.batchUpdate({
+        documentId: docInfo.docId,
+        requestBody: {
+          requests: [
+            {
+              insertText: {
+                tabId: childTabId,
+                location: { index: NEW_TAB_INSERT_INDEX, tabId: childTabId },
+                text: body + '\n',
+              },
+            },
+          ],
+        },
+      })
+    }
 
     return { url: docInfo.url, docId: docInfo.docId }
   } catch (err) {

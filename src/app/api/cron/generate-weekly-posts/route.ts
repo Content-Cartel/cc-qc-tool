@@ -361,11 +361,24 @@ export async function GET(req: NextRequest) {
         await supabase.from('client_content_examples').insert(contentExampleRows)
       }
 
-      // Append to Google Doc
+      // Group the successful posts by platform so each platform lands in its
+      // own sub-tab under the week parent tab in the client's Google Doc.
+      const postsByPlatform: Record<Platform, string[]> = {
+        linkedin: [],
+        twitter: [],
+        facebook: [],
+      }
+      for (const p of postResults) {
+        if (!p.label.includes('ERROR')) {
+          postsByPlatform[p.platform].push(p.content)
+        }
+      }
+
+      // Append to Google Doc using the Week → Platform tab hierarchy.
       let docUrl: string | undefined
       if (process.env.GOOGLE_SERVICE_ACCOUNT_KEY) {
         const folderId = await findClientFolder(clientName)
-        const doc = await appendPostsToDoc(clientName, combinedMarkdown, folderId)
+        const doc = await appendPostsToDoc(clientName, postsByPlatform, folderId)
         if (doc) {
           docUrl = doc.url
           if (savedContent?.id) {
