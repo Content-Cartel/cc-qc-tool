@@ -14,11 +14,22 @@ function getSupabase() {
 
 /**
  * Per-tick cap on how many pending submissions we fire off at Railway.
- * Railway processes transcriptions serially internally; firing too many at
- * once wastes nothing but makes debugging harder. The cron runs daily, so
- * the backlog drains over a few ticks if it's ever huge.
+ * Railway's Deepgram worker queues internally, so this is just a sanity cap.
+ * Running every 2 hours × 200/tick = 2400/day capacity — comfortable headroom
+ * over the normal inflow rate (~10-30 new videos/day across all clients).
  */
-const MAX_PER_TICK = 40
+const MAX_PER_TICK = 200
+
+/**
+ * How long a row can sit in `transcript_status='processing'` before we reset
+ * it to NULL and re-queue. Covers two failure modes:
+ *   1. Railway worker crash mid-batch — the row is wedged because the webhook
+ *      callback never fired and the cron only picks `status IS NULL`.
+ *   2. Legitimately long videos still processing — 45 minutes is comfortably
+ *      more than Deepgram's longest sync transcription path, so we're not
+ *      re-queuing healthy work.
+ */
+const STUCK_PROCESSING_MINUTES = 45
 
 interface TranscribeResult {
   submission_id: string
@@ -61,6 +72,25 @@ export async function GET(req: NextRequest) {
   const appUrl = process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '')
   const callbackUrl = appUrl ? `${appUrl}/api/webhook/transcription-complete` : undefined
 
+  // Reset stuck 'processing' rows before selecting new ones. Rows wedge when
+  // Railway worker crashes mid-batch and the webhook callback never fires.
+  // Anything sitting in 'processing' for >45 min is re-queued by flipping back
+  // to NULL; the idempotency key on client_transcripts (client_id, source,
+  // source_id) prevents double-writes if the original did eventually complete.
+  const stuckCutoff = new Date(Date.now() - STUCK_PROCESSING_MINUTES * 60_000).toISOString()
+  const { data: resetRows, error: resetErr } = await supabase
+    .from('qc_submissions')
+    .update({ transcript_status: null, updated_at: new Date().toISOString() })
+    .eq('transcript_status', 'processing')
+    .lt('updated_at', stuckCutoff)
+    .select('id')
+  const stuckResetCount = resetRows?.length ?? 0
+  if (resetErr) {
+    console.warn('[auto-transcribe] stuck-reset query failed:', resetErr.message)
+  } else if (stuckResetCount > 0) {
+    console.log(`[auto-transcribe] Reset ${stuckResetCount} stuck 'processing' rows older than ${STUCK_PROCESSING_MINUTES}m`)
+  }
+
   // Find pending submissions: transcript_status is NULL AND has a video URL.
   // Ordered oldest-first so the backlog drains fairly.
   const { data: pending, error: queryErr } = await supabase
@@ -79,6 +109,7 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({
       message: 'No pending submissions — backlog clear',
       processed: 0,
+      stuck_reset: stuckResetCount,
       results: [],
     })
   }
@@ -100,9 +131,11 @@ export async function GET(req: NextRequest) {
 
     // Mark as processing so the UI reflects the transition and so a re-run
     // of this cron before Railway callback doesn't double-fire for the same row.
+    // Explicitly bump updated_at so the stuck-reset check above has a fresh
+    // timestamp to measure against next tick.
     const { error: markErr } = await supabase
       .from('qc_submissions')
-      .update({ transcript_status: 'processing' })
+      .update({ transcript_status: 'processing', updated_at: new Date().toISOString() })
       .eq('id', sub.id)
 
     if (markErr) {
@@ -165,10 +198,11 @@ export async function GET(req: NextRequest) {
     const queued = results.filter(r => r.status === 'queued').length
     const errors = results.filter(r => r.status === 'error').length
     const skipped = results.filter(r => r.status === 'skipped').length
+    const resetNote = stuckResetCount > 0 ? `\n_Reset ${stuckResetCount} stuck 'processing' row(s) older than ${STUCK_PROCESSING_MINUTES}m — re-queued._` : ''
     const slackMessage = {
       text: `:microphone: *Auto-transcribe tick*\n` +
         `Queued ${queued} submissions at Deepgram · ${errors} errors · ${skipped} skipped\n` +
-        `Transcripts will bridge into client_transcripts as Railway completes each one.`,
+        `Transcripts will bridge into client_transcripts as Railway completes each one.${resetNote}`,
     }
     fetch(slackWebhook, {
       method: 'POST',
@@ -182,6 +216,7 @@ export async function GET(req: NextRequest) {
     queued: results.filter(r => r.status === 'queued').length,
     errors: results.filter(r => r.status === 'error').length,
     skipped: results.filter(r => r.status === 'skipped').length,
+    stuck_reset: stuckResetCount,
     results,
   })
 }

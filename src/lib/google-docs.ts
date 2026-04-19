@@ -61,6 +61,85 @@ export async function findClientFolder(clientName: string): Promise<string | nul
 }
 
 /**
+ * Find a subfolder within a parent folder by case-insensitive name match.
+ * Used by the Drive-polling cron to locate each client's "LF raw" subfolder
+ * (where editors drop raw long-form videos). Returns null if not found; caller
+ * treats missing subfolders as "no long-form content for this client yet" and
+ * moves on without erroring.
+ *
+ * Matching: exact (case-insensitive trim) wins over a contains match, so
+ * "LF raw" beats "LF raw backup" when both exist.
+ */
+export async function findClientSubfolder(
+  parentFolderId: string,
+  subfolderName: string,
+): Promise<string | null> {
+  const auth = getAuth()
+  if (!auth) return null
+
+  const drive = google.drive({ version: 'v3', auth })
+
+  try {
+    const res = await drive.files.list({
+      q: `'${parentFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+      fields: 'files(id, name)',
+      pageSize: 50,
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+    })
+
+    const folders = res.data.files || []
+    const target = subfolderName.toLowerCase().trim()
+
+    const exact = folders.find(f => f.name?.toLowerCase().trim() === target)
+    if (exact?.id) return exact.id
+
+    const partial = folders.find(f => f.name?.toLowerCase().includes(target))
+    return partial?.id || null
+  } catch (err) {
+    console.error(`[google-docs] Error finding subfolder "${subfolderName}" in ${parentFolderId}:`, err)
+    return null
+  }
+}
+
+/**
+ * List video files inside a folder created within the last `windowHours`.
+ * Used by the Drive-polling cron to pick up newly-dropped raw videos. Returns
+ * only the fields the cron needs; trashed files are excluded. Limit 50 per
+ * tick per folder — plenty for normal inflow.
+ */
+export async function listRecentVideosInFolder(
+  folderId: string,
+  windowHours: number = 72,
+): Promise<Array<{ id: string; name: string; createdTime: string; mimeType: string }>> {
+  const auth = getAuth()
+  if (!auth) return []
+
+  const drive = google.drive({ version: 'v3', auth })
+
+  const cutoff = new Date(Date.now() - windowHours * 60 * 60_000).toISOString()
+
+  try {
+    const res = await drive.files.list({
+      q: `'${folderId}' in parents and mimeType contains 'video/' and trashed = false and createdTime > '${cutoff}'`,
+      fields: 'files(id, name, createdTime, mimeType)',
+      pageSize: 50,
+      supportsAllDrives: true,
+      includeItemsFromAllDrives: true,
+      orderBy: 'createdTime desc',
+    })
+
+    return (res.data.files || []).filter(
+      (f): f is { id: string; name: string; createdTime: string; mimeType: string } =>
+        Boolean(f.id && f.name && f.createdTime && f.mimeType),
+    )
+  } catch (err) {
+    console.error(`[google-docs] Error listing videos in folder ${folderId}:`, err)
+    return []
+  }
+}
+
+/**
  * Find the existing "CC Written Content" doc in a client's folder.
  * Searches for common naming patterns.
  */
