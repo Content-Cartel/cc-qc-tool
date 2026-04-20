@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { extractGoogleDriveFileId } from '@/lib/utils/google-drive'
+import { enqueueTranscription } from '@/lib/transcribe-enqueue'
 
 export const dynamic = 'force-dynamic'
 
@@ -14,9 +14,9 @@ function getSupabase() {
 /**
  * POST /api/transcribe
  *
- * Thin proxy — marks submission as processing, fires webhook to
- * Railway worker, returns immediately. Railway does the heavy lifting
- * (downloads from Drive, runs Deepgram, writes result to Supabase).
+ * Manual-trigger endpoint for the "Generate Transcript" button on the review
+ * page. Thin wrapper around `enqueueTranscription` so the manual and automatic
+ * (intake + drive-scan + 2h cron) paths share one implementation.
  *
  * Body: { submission_id: string }
  */
@@ -29,12 +29,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Missing submission_id' }, { status: 400 })
     }
 
-    const railwayUrl = process.env.RAILWAY_AGENT_URL || process.env.NEXT_PUBLIC_AGENT_WEBHOOK_URL?.replace('/webhook/event', '')
-    if (!railwayUrl) {
-      return NextResponse.json({ error: 'RAILWAY_AGENT_URL not configured' }, { status: 500 })
-    }
-
-    // Get submission
     const { data: submission, error: fetchErr } = await supabase
       .from('qc_submissions')
       .select('id, external_url')
@@ -45,46 +39,14 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Submission not found' }, { status: 404 })
     }
 
-    if (!submission.external_url) {
-      return NextResponse.json({ error: 'No video URL on this submission' }, { status: 400 })
-    }
-
-    const fileId = extractGoogleDriveFileId(submission.external_url)
-    if (!fileId) {
-      return NextResponse.json({ error: 'Could not extract Drive file ID' }, { status: 400 })
-    }
-
-    // Mark as processing
-    await supabase
-      .from('qc_submissions')
-      .update({ transcript_status: 'processing' })
-      .eq('id', submission_id)
-
-    // Fire webhook to Railway
-    const webhookSecret = process.env.TRANSCRIBE_WEBHOOK_SECRET || process.env.NEXT_PUBLIC_AGENT_WEBHOOK_SECRET || ''
-    const appUrl = process.env.NEXT_PUBLIC_APP_URL || (process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '')
-    const callbackUrl = appUrl ? `${appUrl}/api/webhook/transcription-complete` : undefined
-
-    const webhookRes = await fetch(`${railwayUrl}/webhook/transcribe`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-webhook-secret': webhookSecret,
-      },
-      body: JSON.stringify({
-        submission_id,
-        file_id: fileId,
-        ...(callbackUrl ? { callback_url: callbackUrl } : {}),
-      }),
-    }).catch(err => {
-      console.error('[transcribe] Failed to fire webhook to Railway:', err)
-      return null
+    const result = await enqueueTranscription({
+      supabase,
+      submissionId: submission.id,
+      externalUrl: submission.external_url,
     })
 
-    if (!webhookRes || !webhookRes.ok) {
-      const errText = webhookRes ? await webhookRes.text().catch(() => '') : 'Connection failed'
-      console.error(`[transcribe] Railway webhook failed: ${webhookRes?.status || 'no response'} ${errText.slice(0, 200)}`)
-      // Don't fail the request — Railway may still process it
+    if (!result.queued) {
+      return NextResponse.json({ error: result.reason || 'Failed to queue' }, { status: 400 })
     }
 
     return NextResponse.json({ status: 'processing', message: 'Transcription started' })

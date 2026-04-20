@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
 import { findClientFolder, findClientLfSubfolders, listRecentVideosInFolder } from '@/lib/google-docs'
+import { enqueueTranscription } from '@/lib/transcribe-enqueue'
 
 export const maxDuration = 300
 export const dynamic = 'force-dynamic'
@@ -177,12 +178,26 @@ export async function GET(req: NextRequest) {
         continue
       }
 
-      const { error: insertErr } = await supabase.from('qc_submissions').insert(toInsert)
+      const { data: inserted, error: insertErr } = await supabase
+        .from('qc_submissions')
+        .insert(toInsert)
+        .select('id, external_url')
       if (insertErr) {
         console.error(`[pull-drive-long-form] insert failed for ${client.name}:`, insertErr.message)
         result.errors += 1
         results.push(result)
         continue
+      }
+
+      // Fire transcription immediately for each inserted submission. The 2h
+      // auto-transcribe cron still catches any that fail here (its stuck-reset
+      // logic re-queues rows wedged in 'processing').
+      for (const row of inserted || []) {
+        enqueueTranscription({
+          supabase,
+          submissionId: row.id,
+          externalUrl: row.external_url,
+        }).catch(err => console.error('[pull-drive-long-form] enqueueTranscription failed:', err))
       }
 
       result.new_videos_queued = toInsert.length
@@ -211,7 +226,7 @@ export async function GET(req: NextRequest) {
         text: `:satellite_antenna: *Drive LF scan*\n` +
           `${clientsWithLf}/${scannedClients} clients have an LF subfolder · Queued ${totalQueued} new videos\n` +
           perClient + '\n' +
-          `Auto-transcribe will pick these up within 2 hours.`,
+          `Transcription was fired inline for each; the 2h cron is a safety net.`,
       }
       fetch(slackWebhook, {
         method: 'POST',

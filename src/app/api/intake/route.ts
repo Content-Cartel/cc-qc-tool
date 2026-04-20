@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
+import { enqueueTranscription } from '@/lib/transcribe-enqueue'
 
 export const dynamic = 'force-dynamic'
 
@@ -75,6 +76,14 @@ export async function POST(req: NextRequest) {
       console.error('Failed to create submission:', error)
       return NextResponse.json({ error: 'Failed to create submission' }, { status: 500 })
     }
+
+    // Kick off transcription immediately (fire-and-forget). The 2h auto-transcribe
+    // cron catches anything that fails here.
+    enqueueTranscription({
+      supabase,
+      submissionId: submission.id,
+      externalUrl: drive_url,
+    }).catch(err => console.error('[intake] enqueueTranscription failed:', err))
 
     // Notify CC Client Agent (fire-and-forget)
     const agentUrl = process.env.NEXT_PUBLIC_AGENT_WEBHOOK_URL
