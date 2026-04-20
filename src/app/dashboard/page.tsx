@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { RefreshCw, Clock, CheckCircle, AlertTriangle, Eye, LayoutGrid, FolderTree, ChevronDown, ChevronRight } from 'lucide-react'
 import Nav from '@/components/nav'
@@ -56,8 +56,10 @@ export default function DashboardPage() {
   const [viewMode, setViewMode] = useState<ViewMode>('list')
   const [expandedClients, setExpandedClients] = useState<Set<string>>(new Set())
 
-  const loadSubmissions = useCallback(async () => {
-    setLoading(true)
+  // Realtime refreshes pass { silent: true } so the skeleton doesn't flash —
+  // a skeleton flash unmounts the grid and snaps scroll to top.
+  const loadSubmissions = useCallback(async (opts?: { silent?: boolean }) => {
+    if (!opts?.silent) setLoading(true)
     const { data } = await supabase
       .from('qc_submissions')
       .select('*, clients(name)')
@@ -69,7 +71,7 @@ export default function DashboardPage() {
         client_name: (s as unknown as { clients?: { name: string } }).clients?.name || 'Unknown',
       })) as QCSubmission[])
     }
-    setLoading(false)
+    if (!opts?.silent) setLoading(false)
   }, [supabase])
 
   useEffect(() => {
@@ -78,37 +80,43 @@ export default function DashboardPage() {
     const channel = supabase
       .channel('qc-dash')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'qc_submissions' }, () => {
-        loadSubmissions()
+        loadSubmissions({ silent: true })
       })
       .subscribe()
 
     return () => { supabase.removeChannel(channel) }
   }, [supabase, loadSubmissions])
 
-  const stats = {
+  const stats = useMemo(() => ({
     pending: submissions.filter(s => s.status === 'pending' || s.status === 'resubmitted').length,
     inReview: submissions.filter(s => s.status === 'in_review').length,
     approved: submissions.filter(s => s.status === 'approved').length,
     revisions: submissions.filter(s => s.status === 'revision_requested').length,
-  }
+  }), [submissions])
 
-  const pipelineCounts = PIPELINE_STAGES.map(stage => ({
+  const pipelineCounts = useMemo(() => PIPELINE_STAGES.map(stage => ({
     ...stage,
     count: submissions.filter(s => s.current_pipeline_stage === stage.key).length,
-  }))
+  })), [submissions])
 
-  const tabFiltered = submissions.filter(s => {
+  const tabFiltered = useMemo(() => submissions.filter(s => {
     switch (tab) {
       case 'needs_review': return s.status === 'pending' || s.status === 'resubmitted'
       case 'in_progress': return s.status === 'in_review'
       case 'approved': return s.status === 'approved'
       default: return true
     }
-  })
+  }), [submissions, tab])
 
-  const filtered = clientFilter === 'all' ? tabFiltered : tabFiltered.filter(s => s.client_name === clientFilter)
-  const uniqueClients = Array.from(new Set(submissions.map(s => s.client_name || 'Unknown'))).sort()
-  const grouped = buildGroupedData(filtered)
+  const filtered = useMemo(
+    () => clientFilter === 'all' ? tabFiltered : tabFiltered.filter(s => s.client_name === clientFilter),
+    [tabFiltered, clientFilter]
+  )
+  const uniqueClients = useMemo(
+    () => Array.from(new Set(submissions.map(s => s.client_name || 'Unknown'))).sort(),
+    [submissions]
+  )
+  const grouped = useMemo(() => buildGroupedData(filtered), [filtered])
 
   const tabs: { key: FilterTab; label: string; count: number }[] = [
     { key: 'needs_review', label: 'Needs Review', count: stats.pending },
@@ -146,7 +154,7 @@ export default function DashboardPage() {
               {submissions.length} total submissions
             </p>
           </div>
-          <button onClick={loadSubmissions} className="btn-secondary text-xs flex items-center gap-1.5">
+          <button onClick={() => loadSubmissions()} className="btn-secondary text-xs flex items-center gap-1.5">
             <RefreshCw size={12} />
             Refresh
           </button>
