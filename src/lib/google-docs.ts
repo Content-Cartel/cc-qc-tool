@@ -61,35 +61,23 @@ export async function findClientFolder(clientName: string): Promise<string | nul
 }
 
 /**
- * Find a subfolder within a parent folder by case-insensitive name match.
- * Used by the Drive-polling cron to locate each client's "LF raw" subfolder
- * (where editors drop raw long-form videos). Returns null if not found; caller
- * treats missing subfolders as "no long-form content for this client yet" and
- * moves on without erroring.
+ * Find every long-form subfolder inside a client folder.
  *
- * Matching: exact (case-insensitive trim) wins over a contains match, so
- * "LF raw" beats "LF raw backup" when both exist.
+ * Convention established by the creative team: raw long-form lands in a
+ * subfolder whose name STARTS with `LF ` (e.g., `LF Monetary Metals`,
+ * `LF Travis Hasse`, `LF Tom Wheelwright`). Some clients have multiple —
+ * e.g., Dan Brisse has both `LF Dan Brisse` and `LF Podcast Dan Brisse`
+ * — so we return ALL matching folders and the cron scans each.
+ *
+ * Siblings list (every top-level subfolder name inside the client folder)
+ * is returned alongside so the cron can surface folder-naming drift when
+ * a client has no LF folder (e.g., "the editor only made `SF <Client>`").
  */
-export async function findClientSubfolder(
+export async function findClientLfSubfolders(
   parentFolderId: string,
-  subfolderName: string,
-): Promise<string | null> {
-  const { id } = await findClientSubfolderWithSiblings(parentFolderId, subfolderName)
-  return id
-}
-
-/**
- * Variant that also returns the full list of sibling folder names inside the
- * parent. Lets the cron report what subfolders a client DOES have when the
- * expected one is missing — useful for debugging folder-naming conventions
- * without a separate probe endpoint.
- */
-export async function findClientSubfolderWithSiblings(
-  parentFolderId: string,
-  subfolderName: string,
-): Promise<{ id: string | null; siblings: string[] }> {
+): Promise<{ lfFolders: Array<{ id: string; name: string }>; siblings: string[] }> {
   const auth = getAuth()
-  if (!auth) return { id: null, siblings: [] }
+  if (!auth) return { lfFolders: [], siblings: [] }
 
   const drive = google.drive({ version: 'v3', auth })
 
@@ -104,16 +92,19 @@ export async function findClientSubfolderWithSiblings(
 
     const folders = res.data.files || []
     const siblings = folders.map(f => f.name || '').filter(Boolean)
-    const target = subfolderName.toLowerCase().trim()
 
-    const exact = folders.find(f => f.name?.toLowerCase().trim() === target)
-    if (exact?.id) return { id: exact.id, siblings }
+    // Match any folder whose name starts with "LF " or "LF-" (word boundary
+    // after the LF so we don't match e.g. "LFS" or "LFO"). Case-insensitive.
+    // This is the convention across 11 active clients audited 2026-04-19.
+    const lfPattern = /^LF[\s-]/i
+    const lfFolders = folders
+      .filter(f => f.id && f.name && lfPattern.test(f.name))
+      .map(f => ({ id: f.id as string, name: f.name as string }))
 
-    const partial = folders.find(f => f.name?.toLowerCase().includes(target))
-    return { id: partial?.id || null, siblings }
+    return { lfFolders, siblings }
   } catch (err) {
-    console.error(`[google-docs] Error finding subfolder "${subfolderName}" in ${parentFolderId}:`, err)
-    return { id: null, siblings: [] }
+    console.error(`[google-docs] Error listing subfolders in ${parentFolderId}:`, err)
+    return { lfFolders: [], siblings: [] }
   }
 }
 

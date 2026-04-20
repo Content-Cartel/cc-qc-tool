@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { findClientFolder, findClientSubfolderWithSiblings, listRecentVideosInFolder } from '@/lib/google-docs'
+import { findClientFolder, findClientLfSubfolders, listRecentVideosInFolder } from '@/lib/google-docs'
 
 export const maxDuration = 300
 export const dynamic = 'force-dynamic'
@@ -13,11 +13,12 @@ function getSupabase() {
 }
 
 /**
- * Subfolder name inside each client's Shared Drive folder where editors drop
- * raw long-form videos. Case-insensitive match — handles `LF raw`, `LF Raw`,
- * `LF RAW`, etc. Convention established by the creative team.
+ * Long-form folder convention, audited 2026-04-19: every client has a
+ * subfolder whose name STARTS with `LF ` (e.g., `LF Monetary Metals`,
+ * `LF Travis Hasse`). Some clients have multiple (e.g., Dan Brisse has
+ * `LF Dan Brisse` + `LF Podcast Dan Brisse`), so we scan ALL matching
+ * folders per client. `findClientLfSubfolders` handles the regex.
  */
-const LF_SUBFOLDER_NAME = 'LF raw'
 
 /**
  * How far back to look for new videos per tick. The cron runs every 2 hours;
@@ -31,13 +32,16 @@ const LOOKBACK_HOURS = 72
 interface ClientResult {
   client_id: number
   client_name: string
-  lf_folder_found: boolean
+  /** How many LF folders we found inside this client (0 if none). Multiple
+   *  is fine (e.g., `LF <Client>` + `LF Podcast <Client>`) — we scan all. */
+  lf_folders_matched: number
+  /** Names of LF folders we scanned, for the Slack/audit trail. */
+  lf_folder_names?: string[]
   videos_scanned: number
   new_videos_queued: number
   errors: number
-  /** When LF folder wasn't found, list every subfolder name we DID see inside
-   *  the client folder. Surfaces the actual folder convention so we can tune
-   *  LF_SUBFOLDER_NAME if it's off (e.g., "Long Form Raw" vs "LF raw"). */
+  /** When no LF folder matched, list every subfolder name we DID see inside
+   *  the client folder. Surfaces drift or missing-setup cases. */
   subfolders_seen?: string[]
 }
 
@@ -88,37 +92,44 @@ export async function GET(req: NextRequest) {
     const result: ClientResult = {
       client_id: client.id,
       client_name: client.name,
-      lf_folder_found: false,
+      lf_folders_matched: 0,
       videos_scanned: 0,
       new_videos_queued: 0,
       errors: 0,
     }
 
     try {
-      // Walk: Shared Drive → client folder → LF raw subfolder.
+      // Walk: Shared Drive → client folder → every `LF *` subfolder.
       const clientFolderId = await findClientFolder(client.name)
       if (!clientFolderId) {
         results.push(result)
         continue
       }
 
-      const { id: lfFolderId, siblings } = await findClientSubfolderWithSiblings(
-        clientFolderId,
-        LF_SUBFOLDER_NAME,
-      )
-      if (!lfFolderId) {
-        // Surface the actual folder names so we can see the real convention
-        // (e.g., "Long Form Raw", "LF Raw Footage"), not just "not found".
+      const { lfFolders, siblings } = await findClientLfSubfolders(clientFolderId)
+      if (lfFolders.length === 0) {
+        // No `LF *` subfolder at all — surface what the client DOES have so
+        // we can spot drift (e.g., the editor named it `LongForm Raw`) or
+        // flag that an LF folder is missing for this client.
         if (siblings.length > 0) result.subfolders_seen = siblings
         results.push(result)
         continue
       }
-      result.lf_folder_found = true
+      result.lf_folders_matched = lfFolders.length
+      result.lf_folder_names = lfFolders.map(f => f.name)
 
-      const videos = await listRecentVideosInFolder(lfFolderId, LOOKBACK_HOURS)
-      result.videos_scanned = videos.length
+      // Walk each LF folder and collect recent videos. Dedup happens below
+      // across the combined pool, so clients with multiple LF folders (e.g.
+      // Dan Brisse's `LF Dan Brisse` + `LF Podcast Dan Brisse`) don't
+      // double-queue the same file if it somehow lives in both.
+      const allVideos: Array<{ id: string; name: string; createdTime: string; mimeType: string; sourceFolderName: string }> = []
+      for (const lf of lfFolders) {
+        const videos = await listRecentVideosInFolder(lf.id, LOOKBACK_HOURS)
+        for (const v of videos) allVideos.push({ ...v, sourceFolderName: lf.name })
+      }
+      result.videos_scanned = allVideos.length
 
-      if (videos.length === 0) {
+      if (allVideos.length === 0) {
         results.push(result)
         continue
       }
@@ -139,9 +150,13 @@ export async function GET(req: NextRequest) {
         if (match) existingFileIds.add(match[1])
       }
 
+      // Second-layer dedup: if Drive returned the same file from two LF
+      // folders, only insert it once.
+      const seenInThisTick = new Set<string>()
       const toInsert: Array<Record<string, unknown>> = []
-      for (const video of videos) {
-        if (existingFileIds.has(video.id)) continue
+      for (const video of allVideos) {
+        if (existingFileIds.has(video.id) || seenInThisTick.has(video.id)) continue
+        seenInThisTick.add(video.id)
         // Strip extension for a cleaner title (e.g., "Wsbwar.mp4" → "Wsbwar").
         const title = video.name.replace(/\.[^.]+$/, '').trim() || video.name
         toInsert.push({
@@ -181,8 +196,8 @@ export async function GET(req: NextRequest) {
   }
 
   const scannedClients = results.length
-  const clientsWithLf = results.filter(r => r.lf_folder_found).length
-  const clientsMissingLf = results.filter(r => !r.lf_folder_found).length
+  const clientsWithLf = results.filter(r => r.lf_folders_matched > 0).length
+  const clientsMissingLf = results.filter(r => r.lf_folders_matched === 0).length
 
   // Slack-notify only when something happened — avoid noise on empty ticks.
   if (totalQueued > 0) {
@@ -193,8 +208,8 @@ export async function GET(req: NextRequest) {
         .map(r => `  :film_frames: ${r.client_name}: ${r.new_videos_queued} new video${r.new_videos_queued === 1 ? '' : 's'}`)
         .join('\n')
       const message = {
-        text: `:satellite_antenna: *Drive LF-raw scan*\n` +
-          `Scanned ${clientsWithLf}/${scannedClients} clients with an LF raw folder · Queued ${totalQueued} new videos\n` +
+        text: `:satellite_antenna: *Drive LF scan*\n` +
+          `${clientsWithLf}/${scannedClients} clients have an LF subfolder · Queued ${totalQueued} new videos\n` +
           perClient + '\n' +
           `Auto-transcribe will pick these up within 2 hours.`,
       }
