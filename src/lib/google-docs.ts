@@ -74,8 +74,22 @@ export async function findClientSubfolder(
   parentFolderId: string,
   subfolderName: string,
 ): Promise<string | null> {
+  const { id } = await findClientSubfolderWithSiblings(parentFolderId, subfolderName)
+  return id
+}
+
+/**
+ * Variant that also returns the full list of sibling folder names inside the
+ * parent. Lets the cron report what subfolders a client DOES have when the
+ * expected one is missing — useful for debugging folder-naming conventions
+ * without a separate probe endpoint.
+ */
+export async function findClientSubfolderWithSiblings(
+  parentFolderId: string,
+  subfolderName: string,
+): Promise<{ id: string | null; siblings: string[] }> {
   const auth = getAuth()
-  if (!auth) return null
+  if (!auth) return { id: null, siblings: [] }
 
   const drive = google.drive({ version: 'v3', auth })
 
@@ -83,22 +97,23 @@ export async function findClientSubfolder(
     const res = await drive.files.list({
       q: `'${parentFolderId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
       fields: 'files(id, name)',
-      pageSize: 50,
+      pageSize: 100,
       supportsAllDrives: true,
       includeItemsFromAllDrives: true,
     })
 
     const folders = res.data.files || []
+    const siblings = folders.map(f => f.name || '').filter(Boolean)
     const target = subfolderName.toLowerCase().trim()
 
     const exact = folders.find(f => f.name?.toLowerCase().trim() === target)
-    if (exact?.id) return exact.id
+    if (exact?.id) return { id: exact.id, siblings }
 
     const partial = folders.find(f => f.name?.toLowerCase().includes(target))
-    return partial?.id || null
+    return { id: partial?.id || null, siblings }
   } catch (err) {
     console.error(`[google-docs] Error finding subfolder "${subfolderName}" in ${parentFolderId}:`, err)
-    return null
+    return { id: null, siblings: [] }
   }
 }
 

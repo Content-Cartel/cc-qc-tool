@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { createClient } from '@supabase/supabase-js'
-import { findClientFolder, findClientSubfolder, listRecentVideosInFolder } from '@/lib/google-docs'
+import { findClientFolder, findClientSubfolderWithSiblings, listRecentVideosInFolder } from '@/lib/google-docs'
 
 export const maxDuration = 300
 export const dynamic = 'force-dynamic'
@@ -35,6 +35,10 @@ interface ClientResult {
   videos_scanned: number
   new_videos_queued: number
   errors: number
+  /** When LF folder wasn't found, list every subfolder name we DID see inside
+   *  the client folder. Surfaces the actual folder convention so we can tune
+   *  LF_SUBFOLDER_NAME if it's off (e.g., "Long Form Raw" vs "LF raw"). */
+  subfolders_seen?: string[]
 }
 
 /**
@@ -98,8 +102,14 @@ export async function GET(req: NextRequest) {
         continue
       }
 
-      const lfFolderId = await findClientSubfolder(clientFolderId, LF_SUBFOLDER_NAME)
+      const { id: lfFolderId, siblings } = await findClientSubfolderWithSiblings(
+        clientFolderId,
+        LF_SUBFOLDER_NAME,
+      )
       if (!lfFolderId) {
+        // Surface the actual folder names so we can see the real convention
+        // (e.g., "Long Form Raw", "LF Raw Footage"), not just "not found".
+        if (siblings.length > 0) result.subfolders_seen = siblings
         results.push(result)
         continue
       }
